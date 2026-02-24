@@ -1,0 +1,479 @@
+@page "/"
+@inject HttpClient Http
+@inject IJSRuntime Js
+
+<PageTitle>SpeechInsight - Upload &amp; Analyze</PageTitle>
+
+<h1>SpeechInsight</h1>
+<p>Upload an audio file to transcribe.</p>
+
+<div class="samples">
+    <strong>Try a sample:</strong>
+    <a href="https://www2.cs.uic.edu/~i101/SoundFiles/BabyElephantWalk60.wav" target="_blank" rel="noopener">Short WAV</a>
+    <span class="sep">·</span>
+    <a href="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" target="_blank" rel="noopener">Sample MP3</a>
+    <span class="hint-inline">(download, then upload here)</span>
+</div>
+
+<div class="upload-row">
+    <InputFile OnChange="OnFileSelected" accept=".mp3,.mpga,.m4a,.wav,.webm,.mp4,.mpeg,audio/*" />
+    @if (_selectedFile != null)
+    {
+        <span class="file-info">@_selectedFile.Name (@FormatFileSize(_selectedFile.Size))</span>
+    }
+</div>
+@if (!string.IsNullOrEmpty(_fileValidationError))
+{
+    <p class="error">@_fileValidationError</p>
+}
+
+<div class="model-row">
+    <label for="model-select">Model:</label>
+    <select id="model-select" @bind="_modelChoice" disabled="@_isUploading">
+        <option value="diarize">With speakers (recommended)</option>
+        <option value="basic">Basic (Whisper — cheaper)</option>
+    </select>
+</div>
+<p class="cost-hint">Basic is cheaper; “With speakers” uses a more capable model and may cost more per minute.</p>
+
+<div class="button-row">
+    <button type="button" @onclick="HandleSubmit" disabled="@_isUploading">Upload and Analyze</button>
+    @if (_isUploading)
+    {
+        <button type="button" class="cancel" @onclick="CancelUpload">Cancel</button>
+    }
+</div>
+
+@if (_isUploading)
+{
+    <p class="loading-msg"><em>Uploading and transcribing…</em></p>
+}
+
+@if (_durationExceedsRecommended)
+{
+    <p class="warning">This clip is longer than the recommended limit. For long files, consider splitting or using shorter segments.</p>
+}
+
+@if (_stats != null)
+{
+    <h2>Stats</h2>
+    <div class="stats">
+        <div><b>Duration</b>: @(_stats.DurationSeconds.HasValue ? $"{_stats.DurationSeconds:F1}s" : "—")</div>
+        <div><b>Words</b>: @_stats.WordCount</div>
+        <div><b>Characters</b>: @_stats.CharCount</div>
+        <div><b>Segments</b>: @_stats.SegmentCount</div>
+        <div><b>Diarized</b>: @_stats.Diarized</div>
+        <div><b>Model</b>: @_stats.Model</div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(_transcription))
+{
+    <h2>Transcription</h2>
+    <pre>@_transcription</pre>
+
+    <div class="actions">
+        <button type="button" @onclick="CopyTranscript" disabled="@_isUploading">Copy</button>
+        <button type="button" @onclick="DownloadTxt" disabled="@_isUploading">Download .txt</button>
+        <button type="button" @onclick="DownloadJson" disabled="@(_isUploading || _details == null)">Download .json</button>
+    </div>
+    @if (!string.IsNullOrEmpty(_actionHint))
+    {
+        <div class="hint">@_actionHint</div>
+    }
+}
+
+@if (!string.IsNullOrEmpty(_error))
+{
+    <p class="error">@_error</p>
+}
+
+@if (_history.Count > 0)
+{
+    <h2>Recent</h2>
+    <p class="hint">Saved in this browser. Click a file to view again.</p>
+    <ul class="history-list">
+        @foreach (var h in _history)
+        {
+            <li>
+                <button type="button" class="link-btn" @onclick="() => RestoreHistory(h)">@h.FileName</button>
+                — @(h.DurationSeconds.HasValue ? $"{h.DurationSeconds:F0}s" : "—") · @h.WordCount words
+            </li>
+        }
+    </ul>
+    <button type="button" class="clear-history" @onclick="ClearHistoryAsync">Clear recent</button>
+}
+
+@code {
+    private const long MaxFileSizeBytes = 25 * 1024 * 1024;
+    private const string HistoryStorageKey = "SpeechInsight_Recent";
+    private static readonly string[] AllowedExtensions = { ".mp3", ".mpga", ".m4a", ".wav", ".webm", ".mp4", ".mpeg" };
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+    };
+
+    private IBrowserFile? _selectedFile;
+    private string? _transcription;
+    private string? _error;
+    private string? _fileValidationError;
+    private bool _isUploading;
+    private string _modelChoice = "diarize";
+    private bool _diarize => _modelChoice == "diarize";
+    private bool _durationExceedsRecommended;
+    private StatsView? _stats;
+    private TranscriptionDetailsView? _details;
+    private string? _actionHint;
+    private readonly List<HistoryEntry> _history = new();
+    private CancellationTokenSource? _uploadCts;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var json = await Js.InvokeAsync<string?>("speechInsight.getLocalStorage", HistoryStorageKey);
+            if (string.IsNullOrWhiteSpace(json)) return;
+
+            var stored = System.Text.Json.JsonSerializer.Deserialize<List<StoredHistoryItem>>(json, JsonOptions);
+            if (stored == null) return;
+
+            _history.Clear();
+            foreach (var item in stored.Take(3))
+            {
+                if (item.Details == null) continue;
+                _history.Add(new HistoryEntry(
+                    item.FileName ?? "Unknown",
+                    item.DurationSeconds,
+                    item.WordCount,
+                    item.Transcription ?? "",
+                    item.Details));
+            }
+        }
+        catch
+        {
+            // Ignore corrupt or missing localStorage
+        }
+    }
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        _selectedFile = e.File;
+        _error = null;
+        _fileValidationError = null;
+        _transcription = null;
+        _stats = null;
+        _details = null;
+        _actionHint = null;
+
+        if (_selectedFile == null) return;
+
+        var ext = System.IO.Path.GetExtension(_selectedFile.Name);
+        if (string.IsNullOrEmpty(ext) || !AllowedExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase))
+        {
+            _fileValidationError = $"Allowed types: {string.Join(", ", AllowedExtensions)}. Max size: {MaxFileSizeBytes / (1024 * 1024)} MB.";
+            _selectedFile = null;
+            return;
+        }
+        if (_selectedFile.Size > MaxFileSizeBytes)
+        {
+            _fileValidationError = $"File too large. Maximum size is {MaxFileSizeBytes / (1024 * 1024)} MB.";
+            _selectedFile = null;
+            return;
+        }
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / (1024.0 * 1024.0):F1} MB";
+    }
+
+    private async Task HandleSubmit()
+    {
+        if (_selectedFile == null)
+        {
+            _error = "Please select an audio file first.";
+            return;
+        }
+
+        _error = null;
+        _fileValidationError = null;
+        _transcription = null;
+        _stats = null;
+        _details = null;
+        _actionHint = null;
+        _durationExceedsRecommended = false;
+        _uploadCts = new CancellationTokenSource();
+        _isUploading = true;
+        StateHasChanged();
+
+        try
+        {
+            using var content = new MultipartFormDataContent();
+            var stream = _selectedFile.OpenReadStream(maxAllowedSize: MaxFileSizeBytes);
+            await using var _ = stream;
+            content.Add(new StreamContent(stream), "audioFile", _selectedFile.Name);
+
+            var endpoint = $"api/audio/analyze/details?diarize={(_modelChoice == "diarize").ToString().ToLowerInvariant()}";
+            var response = await Http.PostAsync(endpoint, content, _uploadCts.Token);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var details = await response.Content.ReadFromJsonAsync<TranscriptionDetailsView>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (details == null)
+                {
+                    _error = "Unexpected response from server.";
+                    return;
+                }
+
+                _details = details;
+                _transcription = FormatTranscript(details);
+                _stats = BuildStats(details);
+                _durationExceedsRecommended = details.DurationExceedsRecommended;
+
+                _history.Insert(0, new HistoryEntry(
+                    _selectedFile.Name,
+                    details.DurationSeconds,
+                    _stats.WordCount,
+                    _transcription,
+                    details));
+                while (_history.Count > 3) _history.RemoveAt(_history.Count - 1);
+                await PersistHistoryAsync();
+            }
+            else
+            {
+                var body = await response.Content.ReadAsStringAsync();
+                _error = ParseErrorMessage(response.StatusCode, body);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _error = "Upload cancelled.";
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _isUploading = false;
+            _uploadCts = null;
+            StateHasChanged();
+        }
+    }
+
+    private void CancelUpload()
+    {
+        _uploadCts?.Cancel();
+    }
+
+    private static string ParseErrorMessage(System.Net.HttpStatusCode status, string body)
+    {
+        try
+        {
+            var json = System.Text.Json.JsonDocument.Parse(body);
+            if (json.RootElement.TryGetProperty("message", out var msg))
+                return msg.GetString() ?? status.ToString();
+        }
+        catch { /* ignore */ }
+        return status switch
+        {
+            System.Net.HttpStatusCode.BadRequest => "Invalid request. Check file type and size.",
+            System.Net.HttpStatusCode.Unauthorized => "API key invalid or missing.",
+            System.Net.HttpStatusCode.Forbidden => "Access denied. Check your OpenAI plan.",
+            System.Net.HttpStatusCode.TooManyRequests => "Rate limit or quota exceeded. Check billing.",
+            System.Net.HttpStatusCode.InternalServerError => "Server error. Try again later.",
+            _ => string.IsNullOrEmpty(body) ? status.ToString() : body
+        };
+    }
+
+    private void RestoreHistory(HistoryEntry entry)
+    {
+        _transcription = entry.Transcription;
+        _details = entry.Details;
+        _stats = BuildStats(entry.Details);
+        _durationExceedsRecommended = entry.Details.DurationExceedsRecommended;
+        _error = null;
+        _actionHint = null;
+        StateHasChanged();
+    }
+
+    private sealed record HistoryEntry(string FileName, double? DurationSeconds, int WordCount, string Transcription, TranscriptionDetailsView Details);
+
+    private async Task PersistHistoryAsync()
+    {
+        try
+        {
+            var list = _history.Select(h => new StoredHistoryItem
+            {
+                FileName = h.FileName,
+                DurationSeconds = h.DurationSeconds,
+                WordCount = h.WordCount,
+                Transcription = h.Transcription,
+                Details = h.Details
+            }).ToList();
+            var json = System.Text.Json.JsonSerializer.Serialize(list, JsonOptions);
+            await Js.InvokeVoidAsync("speechInsight.setLocalStorage", HistoryStorageKey, json);
+        }
+        catch { /* quota or disabled */ }
+    }
+
+    private async Task ClearHistoryAsync()
+    {
+        _history.Clear();
+        try
+        {
+            await Js.InvokeVoidAsync("speechInsight.setLocalStorage", HistoryStorageKey, "");
+        }
+        catch { /* ignore */ }
+        StateHasChanged();
+    }
+
+    private sealed class StoredHistoryItem
+    {
+        public string FileName { get; set; } = "";
+        public double? DurationSeconds { get; set; }
+        public int WordCount { get; set; }
+        public string Transcription { get; set; } = "";
+        public TranscriptionDetailsView? Details { get; set; }
+    }
+
+    private static string FormatTranscript(TranscriptionDetailsView details)
+    {
+        if (details.Segments is { Count: > 0 })
+        {
+            var speakerMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var speakerCounter = 0;
+
+            string NormalizeSpeaker(string? raw)
+            {
+                var key = string.IsNullOrWhiteSpace(raw) ? "unknown" : raw.Trim();
+                if (!speakerMap.TryGetValue(key, out var mapped))
+                {
+                    speakerCounter++;
+                    mapped = $"Speaker {speakerCounter}";
+                    speakerMap[key] = mapped;
+                }
+                return mapped;
+            }
+
+            var blocks = new List<(string Speaker, string Text)>();
+            foreach (var s in details.Segments)
+            {
+                var t = (s.Text ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(t))
+                    continue;
+
+                var speaker = NormalizeSpeaker(s.Speaker);
+
+                if (blocks.Count > 0 && blocks[^1].Speaker == speaker)
+                {
+                    blocks[^1] = (speaker, $"{blocks[^1].Text} {t}".Trim());
+                }
+                else
+                {
+                    blocks.Add((speaker, t));
+                }
+            }
+
+            return string.Join(
+                "\n\n",
+                blocks.Select(b => $"{b.Speaker}: {b.Text}").Where(x => !string.IsNullOrWhiteSpace(x)));
+        }
+
+        return details.Text ?? "";
+    }
+
+    private static StatsView BuildStats(TranscriptionDetailsView details)
+    {
+        var text = details.Text ?? "";
+        var words = text.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
+        return new StatsView(
+            DurationSeconds: details.DurationSeconds,
+            WordCount: words,
+            CharCount: text.Length,
+            SegmentCount: details.Segments?.Count ?? 0,
+            Diarized: details.Diarized,
+            Model: details.Model ?? "—");
+    }
+
+    private sealed record StatsView(
+        double? DurationSeconds,
+        int WordCount,
+        int CharCount,
+        int SegmentCount,
+        bool Diarized,
+        string Model);
+
+    private sealed class TranscriptionDetailsView
+    {
+        public string? Text { get; set; }
+        public string? Model { get; set; }
+        public double? DurationSeconds { get; set; }
+        public List<TranscriptionSegmentView>? Segments { get; set; }
+        public bool Diarized { get; set; }
+        public bool DurationExceedsRecommended { get; set; }
+    }
+
+    private sealed class TranscriptionSegmentView
+    {
+        public string? Speaker { get; set; }
+        public double? StartSeconds { get; set; }
+        public double? EndSeconds { get; set; }
+        public string? Text { get; set; }
+    }
+
+    private async Task CopyTranscript()
+    {
+        if (string.IsNullOrEmpty(_transcription))
+            return;
+
+        _actionHint = null;
+        try
+        {
+            await Js.InvokeVoidAsync("speechInsight.copyText", _transcription);
+            _actionHint = "Copied to clipboard.";
+        }
+        catch
+        {
+            _actionHint = "Copy failed (browser permissions).";
+        }
+    }
+
+    private async Task DownloadTxt()
+    {
+        if (string.IsNullOrEmpty(_transcription))
+            return;
+
+        var baseName = GetSafeBaseFileName(_selectedFile?.Name) ?? "transcription";
+        await Js.InvokeVoidAsync("speechInsight.download", $"{baseName}.txt", "text/plain;charset=utf-8", _transcription);
+    }
+
+    private async Task DownloadJson()
+    {
+        if (_details == null)
+            return;
+
+        var baseName = GetSafeBaseFileName(_selectedFile?.Name) ?? "transcription";
+        var json = System.Text.Json.JsonSerializer.Serialize(_details, new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true
+        });
+
+        await Js.InvokeVoidAsync("speechInsight.download", $"{baseName}.json", "application/json;charset=utf-8", json);
+    }
+
+    private static string? GetSafeBaseFileName(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+            return null;
+
+        var name = System.IO.Path.GetFileNameWithoutExtension(fileName);
+        foreach (var c in System.IO.Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return string.IsNullOrWhiteSpace(name) ? "transcription" : name;
+    }
+}
