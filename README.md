@@ -183,9 +183,3 @@ Base URL when running locally: **http://localhost:5200**.
 - **429 / quota** – Your OpenAI account has no quota or rate limit; check plan and billing.
 - **Empty or wrong transcription** – Use an allowed format (e.g. mp3, wav, m4a) and stay under the max file size. For long files, the UI may show a “longer than recommended” warning; you can still use the result.
 - **Recent not persisting** – Recent is stored in the browser’s localStorage for this origin. Private/incognito or clearing site data will remove it. Use **Clear recent** to wipe it manually.
-
----
-
-## License / status
-
-Initial version for demo and local use. Adjust config and CORS for your environment before any production or shared deployment.
