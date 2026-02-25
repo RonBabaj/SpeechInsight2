@@ -100,13 +100,12 @@ Then open **http://localhost:5190** in the browser.
 
 ## User flow
 
-1. **Sample clips** – Optional “Try a sample” links open short audio files; download one and upload it here to test.
-2. **Model** – Choose **“With speakers (recommended)”** (diarized) or **“Basic (Whisper — cheaper)”**.
-3. **File** – Use “Choose File” to select an allowed type (e.g. .mp3, .wav, .m4a) and under the configured max size (default 25 MB). Invalid type/size shows an error before upload.
-4. **Upload** – Click **Upload and Analyze**. Use **Cancel** to abort the request.
-5. **Result** – Stats (duration, words, characters, segments, model) and the transcription (with speaker labels when diarized). If the clip is longer than the recommended limit, a short warning is shown.
-6. **Export** – **Copy**, **Download .txt**, or **Download .json** (full details).
-7. **Recent** – The last 3 analyses are listed; click a file name to view that result again. Data is stored in the browser’s **localStorage**. Use **Clear recent** to remove all stored entries and clear the list.
+1. **Model** – Choose **“With speakers (recommended)”** (diarized) or **“Basic (Whisper — cheaper)”**.
+2. **File** – Use “Choose File” to select an allowed type (e.g. .mp3, .wav, .m4a) and under the configured max size (default 25 MB). Invalid type/size shows an error before upload.
+3. **Upload** – Click **Upload and Analyze**. Use **Cancel** to abort the request.
+4. **Result** – Stats (duration, words, characters, segments, model) and the transcription (with speaker labels when diarized). If the clip is longer than the recommended limit, a short warning is shown.
+5. **Export** – **Copy**, **Download .txt**, or **Download .json** (full details).
+6. **Recent** – The last 3 analyses are listed; click a file name to view that result again. Data is stored in the browser’s **localStorage**. Use **Clear recent** to remove all stored entries and clear the list.
 
 ---
 
