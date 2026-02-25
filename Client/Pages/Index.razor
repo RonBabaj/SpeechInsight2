@@ -7,14 +7,6 @@
 <h1>SpeechInsight</h1>
 <p>Upload an audio file to transcribe.</p>
 
-<div class="samples">
-    <strong>Try a sample:</strong>
-    <a href="https://www2.cs.uic.edu/~i101/SoundFiles/BabyElephantWalk60.wav" target="_blank" rel="noopener">Short WAV</a>
-    <span class="sep">·</span>
-    <a href="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" target="_blank" rel="noopener">Sample MP3</a>
-    <span class="hint-inline">(download, then upload here)</span>
-</div>
-
 <div class="upload-row">
     <InputFile OnChange="OnFileSelected" accept=".mp3,.mpga,.m4a,.wav,.webm,.mp4,.mpeg,audio/*" />
     @if (_selectedFile != null)
@@ -29,7 +21,7 @@
 
 <div class="model-row">
     <label for="model-select">Model:</label>
-    <select id="model-select" @bind="_modelChoice" disabled="@_isUploading">
+    <select id="model-select" value="@_modelChoice" @onchange="OnModelChanged" disabled="@_isUploading">
         <option value="diarize">With speakers (recommended)</option>
         <option value="basic">Basic (Whisper — cheaper)</option>
     </select>
@@ -37,16 +29,23 @@
 <p class="cost-hint">Basic is cheaper; “With speakers” uses a more capable model and may cost more per minute.</p>
 
 <div class="button-row">
-    <button type="button" @onclick="HandleSubmit" disabled="@_isUploading">Upload and Analyze</button>
+    <button type="button" @onclick="HandleSubmit" disabled="@(_isUploading || _selectedFile == null)">Upload and Analyze</button>
     @if (_isUploading)
     {
         <button type="button" class="cancel" @onclick="CancelUpload">Cancel</button>
     }
 </div>
-
-@if (_isUploading)
+@if (_selectedFile == null)
 {
-    <p class="loading-msg"><em>Uploading and transcribing…</em></p>
+    <p class="hint">Select an audio file to enable upload.</p>
+}
+
+@if (_isUploading || !string.IsNullOrEmpty(_loadingStatus))
+{
+    <div class="loading-box" role="status" aria-live="polite">
+        <div class="spinner"></div>
+        <span class="loading-text">@(_loadingStatus ?? "Uploading…")</span>
+    </div>
 }
 
 @if (_durationExceedsRecommended)
@@ -54,23 +53,38 @@
     <p class="warning">This clip is longer than the recommended limit. For long files, consider splitting or using shorter segments.</p>
 }
 
+<div id="transcription-result">
 @if (_stats != null)
 {
     <h2>Stats</h2>
-    <div class="stats">
-        <div><b>Duration</b>: @(_stats.DurationSeconds.HasValue ? $"{_stats.DurationSeconds:F1}s" : "—")</div>
-        <div><b>Words</b>: @_stats.WordCount</div>
-        <div><b>Characters</b>: @_stats.CharCount</div>
-        <div><b>Segments</b>: @_stats.SegmentCount</div>
-        <div><b>Diarized</b>: @_stats.Diarized</div>
-        <div><b>Model</b>: @_stats.Model</div>
+    <div class="stats-cards">
+        <div class="stat-card"><span class="stat-label">Duration</span><span class="stat-value">@(_stats.DurationSeconds.HasValue ? $"{_stats.DurationSeconds:F1}s" : "—")</span></div>
+        <div class="stat-card"><span class="stat-label">Words</span><span class="stat-value">@_stats.WordCount</span></div>
+        <div class="stat-card"><span class="stat-label">Characters</span><span class="stat-value">@_stats.CharCount</span></div>
+        <div class="stat-card"><span class="stat-label">Segments</span><span class="stat-value">@_stats.SegmentCount</span></div>
+        <div class="stat-card"><span class="stat-label">Model</span><span class="stat-value stat-model">@_stats.Model</span></div>
     </div>
 }
 
 @if (!string.IsNullOrEmpty(_transcription))
 {
     <h2>Transcription</h2>
-    <pre>@_transcription</pre>
+    <div class="transcript-container">
+        <div class="transcript-inner">
+            @foreach (var block in GetTranscriptBlocks())
+            {
+                if (block.Speaker != null)
+                {
+                    <span class="speaker-label">@block.Speaker:</span><span class="transcript-text">@block.Text</span>
+                }
+                else
+                {
+                    <span class="transcript-text">@block.Text</span>
+                }
+                <br />
+            }
+        </div>
+    </div>
 
     <div class="actions">
         <button type="button" @onclick="CopyTranscript" disabled="@_isUploading">Copy</button>
@@ -79,13 +93,16 @@
     </div>
     @if (!string.IsNullOrEmpty(_actionHint))
     {
-        <div class="hint">@_actionHint</div>
+        <div class="hint @(_actionHint.StartsWith("Copied") ? "copy-success" : "")">@_actionHint</div>
     }
 }
+</div>
 
 @if (!string.IsNullOrEmpty(_error))
 {
-    <p class="error">@_error</p>
+    <div class="error-box" role="alert">
+        <strong>Something went wrong</strong><br />@_error
+    </div>
 }
 
 @if (_history.Count > 0)
@@ -107,6 +124,7 @@
 @code {
     private const long MaxFileSizeBytes = 25 * 1024 * 1024;
     private const string HistoryStorageKey = "SpeechInsight_Recent";
+    private const string ModelStorageKey = "SpeechInsight_Model";
     private static readonly string[] AllowedExtensions = { ".mp3", ".mpga", ".m4a", ".wav", ".webm", ".mp4", ".mpeg" };
     private static readonly System.Text.Json.JsonSerializerOptions JsonOptions = new()
     {
@@ -127,9 +145,18 @@
     private string? _actionHint;
     private readonly List<HistoryEntry> _history = new();
     private CancellationTokenSource? _uploadCts;
+    private string? _loadingStatus;
 
     protected override async Task OnInitializedAsync()
     {
+        try
+        {
+            var savedModel = await Js.InvokeAsync<string?>("speechInsight.getLocalStorage", ModelStorageKey);
+            if (savedModel == "basic" || savedModel == "diarize")
+                _modelChoice = savedModel;
+        }
+        catch { /* ignore */ }
+
         try
         {
             var json = await Js.InvokeAsync<string?>("speechInsight.getLocalStorage", HistoryStorageKey);
@@ -156,6 +183,20 @@
         }
     }
 
+    private async Task OnModelChanged(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        if (value == "basic" || value == "diarize")
+        {
+            _modelChoice = value;
+            try
+            {
+                await Js.InvokeVoidAsync("speechInsight.setLocalStorage", ModelStorageKey, value);
+            }
+            catch { /* ignore */ }
+        }
+    }
+
     private void OnFileSelected(InputFileChangeEventArgs e)
     {
         _selectedFile = e.File;
@@ -171,15 +212,37 @@
         var ext = System.IO.Path.GetExtension(_selectedFile.Name);
         if (string.IsNullOrEmpty(ext) || !AllowedExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase))
         {
-            _fileValidationError = $"Allowed types: {string.Join(", ", AllowedExtensions)}. Max size: {MaxFileSizeBytes / (1024 * 1024)} MB.";
+            _fileValidationError = "Please choose an audio file (e.g. MP3, WAV, M4A). Max size: 25 MB.";
             _selectedFile = null;
             return;
         }
         if (_selectedFile.Size > MaxFileSizeBytes)
         {
-            _fileValidationError = $"File too large. Maximum size is {MaxFileSizeBytes / (1024 * 1024)} MB.";
+            _fileValidationError = "File is too large. Maximum size is 25 MB.";
             _selectedFile = null;
             return;
+        }
+    }
+
+    private IEnumerable<(string? Speaker, string Text)> GetTranscriptBlocks()
+    {
+        if (string.IsNullOrEmpty(_transcription)) yield break;
+        var paragraphs = _transcription!.Split("\n\n", StringSplitOptions.None);
+        foreach (var p in paragraphs)
+        {
+            var trimmed = p.Trim();
+            if (string.IsNullOrEmpty(trimmed)) continue;
+            var colon = trimmed.IndexOf(": ", StringComparison.Ordinal);
+            if (colon > 0 && trimmed.StartsWith("Speaker ", StringComparison.OrdinalIgnoreCase))
+            {
+                var speaker = trimmed[..colon];
+                var text = trimmed[(colon + 2)..].Trim();
+                yield return (speaker, text);
+            }
+            else
+            {
+                yield return (null, trimmed);
+            }
         }
     }
 
@@ -207,7 +270,21 @@
         _durationExceedsRecommended = false;
         _uploadCts = new CancellationTokenSource();
         _isUploading = true;
+        _loadingStatus = "Uploading…";
         StateHasChanged();
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(1600);
+            await InvokeAsync(() =>
+            {
+                if (_isUploading && _loadingStatus == "Uploading…")
+                {
+                    _loadingStatus = "Transcribing…";
+                    StateHasChanged();
+                }
+            });
+        });
 
         try
         {
@@ -221,11 +298,15 @@
 
             if (response.IsSuccessStatusCode)
             {
+                _loadingStatus = "Done";
+                StateHasChanged();
+
                 var details = await response.Content.ReadFromJsonAsync<TranscriptionDetailsView>(
                     new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 if (details == null)
                 {
-                    _error = "Unexpected response from server.";
+                    _error = "The server returned an unexpected response. Please try again.";
+                    _loadingStatus = null;
                     return;
                 }
 
@@ -242,6 +323,10 @@
                     details));
                 while (_history.Count > 3) _history.RemoveAt(_history.Count - 1);
                 await PersistHistoryAsync();
+
+                await Task.Delay(400);
+                _loadingStatus = null;
+                try { await Js.InvokeVoidAsync("speechInsight.scrollToId", "transcription-result"); } catch { /* ignore */ }
             }
             else
             {
@@ -251,16 +336,18 @@
         }
         catch (OperationCanceledException)
         {
-            _error = "Upload cancelled.";
+            _error = "Upload was cancelled.";
         }
         catch (Exception ex)
         {
-            _error = ex.Message;
+            _error = "Upload failed. Please check your connection and try again. " + ex.Message;
         }
         finally
         {
             _isUploading = false;
             _uploadCts = null;
+            if (_loadingStatus == "Uploading…" || _loadingStatus == "Transcribing…")
+                _loadingStatus = null;
             StateHasChanged();
         }
     }
@@ -432,14 +519,29 @@
             return;
 
         _actionHint = null;
+        StateHasChanged();
         try
         {
             await Js.InvokeVoidAsync("speechInsight.copyText", _transcription);
             _actionHint = "Copied to clipboard.";
+            StateHasChanged();
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2500);
+                await InvokeAsync(() =>
+                {
+                    if (_actionHint == "Copied to clipboard.")
+                    {
+                        _actionHint = null;
+                        StateHasChanged();
+                    }
+                });
+            });
         }
         catch
         {
-            _actionHint = "Copy failed (browser permissions).";
+            _actionHint = "Copy failed. Please check browser permissions.";
+            StateHasChanged();
         }
     }
 
