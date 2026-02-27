@@ -1,0 +1,53 @@
+@namespace SpeechInsight.Client.Components
+
+<div class="card analysis-panel">
+    <h2 class="card-title">Analysis</h2>
+    @if (DurationExceedsRecommended)
+    {
+        <p class="warning">This clip is longer than the recommended limit. Consider shorter segments for long files.</p>
+    }
+    <div class="stats-cards">
+        <div class="stat-card"><span class="stat-label">Duration</span><span class="stat-value">@FormatDuration(DurationSeconds)</span></div>
+        <div class="stat-card"><span class="stat-label">Words</span><span class="stat-value">@FormatWordCount(WordCount)</span></div>
+        <div class="stat-card"><span class="stat-label">Characters</span><span class="stat-value">@CharCount</span></div>
+        <div class="stat-card"><span class="stat-label">Segments</span><span class="stat-value">@SegmentCount</span></div>
+        <div class="stat-card"><span class="stat-label">Language</span><span class="stat-value">@FormatLanguage(DetectedLanguage)</span></div>
+        <div class="stat-card"><span class="stat-label">Confidence</span><span class="stat-value">@FormatConfidence(ConfidenceScore)</span></div>
+        <div class="stat-card"><span class="stat-label">Model</span><span class="stat-value stat-model">@(Model ?? "—")</span></div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public double? DurationSeconds { get; set; }
+    [Parameter] public int WordCount { get; set; }
+    [Parameter] public int CharCount { get; set; }
+    [Parameter] public int SegmentCount { get; set; }
+    [Parameter] public string? DetectedLanguage { get; set; }
+    [Parameter] public double? ConfidenceScore { get; set; }
+    [Parameter] public string? Model { get; set; }
+    [Parameter] public bool DurationExceedsRecommended { get; set; }
+
+    private static string FormatDuration(double? seconds)
+    {
+        if (!seconds.HasValue || double.IsNaN(seconds.Value) || seconds.Value < 0) return "Unavailable";
+        var t = TimeSpan.FromSeconds(seconds.Value);
+        return $"{(int)t.TotalMinutes}:{t.Seconds:D2}";
+    }
+
+    private static string FormatWordCount(int count)
+    {
+        if (count < 0) return "Unavailable";
+        return count.ToString();
+    }
+
+    private static string FormatLanguage(string? code)
+    {
+        return string.IsNullOrWhiteSpace(code) ? "Unavailable" : code;
+    }
+
+    private static string FormatConfidence(double? score)
+    {
+        if (!score.HasValue || double.IsNaN(score.Value) || score.Value < 0) return "Unavailable";
+        return $"{(int)(Math.Clamp(score.Value, 0, 1) * 100)}%";
+    }
+}
