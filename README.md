@@ -116,15 +116,59 @@ Then open **http://localhost:5190** in the browser.
 
 ---
 
-## User flow
+## Flow and features
 
-1. **Model** – Choose **“With speakers (recommended)”** (diarized) or **“Basic (Whisper — cheaper)”**.
-2. **Source** – Either **“Choose File”** (e.g. .mp3, .wav, .m4a, .webm) or **“Record from microphone”** (browser records; stop to get a clip, then upload). Invalid type/size or no source shows an error before upload.
-3. **Upload** – Click **Upload and Analyze**. Use **Cancel** to abort. The same backend endpoint is used for both file uploads and recordings.
-4. **Result** – **Analysis** card: duration (mm:ss), word count, characters, segments, detected language, confidence (%), model. **Transcription** card: full text with speaker labels when diarized. If the clip exceeds the recommended duration, a warning is shown.
-5. **Export** – **Copy**, **Download .txt**, or **Download .json** (full details).
-6. **Recent** – The last 3 analyses are listed; click a file name to view that result again. Data is in the browser’s **localStorage**. **Clear recent** removes stored entries.
-7. **Theme** – Use the **Dark** / **Light** toggle in the header; preference is stored in localStorage.
+This section walks through the app from first load to results and explains what each part does.
+
+### Landing (Home)
+
+- At **http://localhost:5190** you see the **SpeechInsight** title, tagline, and three short cards: **Upload audio**, **Transcribe**, **Export**.
+- **Upload & transcribe** sends you to the main workflow. The header has **Home**, **Upload**, and a **Dark** / **Light** theme toggle (preference is saved in the browser).
+
+### Choosing input and model (Upload page)
+
+- **Model** – Choose **“With speakers (recommended)”** (diarized) or **“Basic (Whisper — cheaper)”**.
+- **Source (pick one)**
+  - **Choose File** – Pick an audio file from your device. Allowed types: .mp3, .mpga, .m4a, .wav, .webm, .mp4, .mpeg, up to 25 MB. Wrong type or oversized file shows an error under the file input; you can't submit until it's valid.
+  - **Record from microphone** – Click **Record from microphone**. The browser asks for mic permission; after you allow, recording starts. Click **Stop recording** when done. The clip appears as "Recording ready (X.X KB)". Recording is WebM; the same backend endpoint is used as for file uploads. You can't mix: if you have a file selected, Record is disabled; if you record, the file picker is disabled until you clear the recording by uploading or refreshing.
+
+- **Upload and Analyze** is enabled only when you have a valid file or a recording. Click it to send the audio to the API.
+
+### While the request is in progress
+
+- A **processing** state appears: first "Uploading…", then "Transcribing…" after a short delay. **Cancel** aborts the request. Errors (e.g. network, API key, quota) are shown in a red **Something went wrong** card with a short message; no stack traces.
+
+### Results: Analysis card
+
+After a successful run, the **Analysis** card shows:
+
+- **Duration** – Length of the audio in **mm:ss** (e.g. 2:35). For WAV files this comes from the file; for other formats it comes from the transcription provider. If unknown, the UI shows "Unavailable".
+- **Words** – Number of words in the transcript (server-computed, filler words like "um" / "[inaudible]" excluded).
+- **Characters** – Character count of the full transcript.
+- **Segments** – Number of timed segments (especially meaningful when using the diarization model).
+- **Language** – Detected language code (e.g. en, he, ru) from the provider or a script-based heuristic. "Unavailable" if neither is possible.
+- **Confidence** – A **percentage** from an evidence-based heuristic (transcription length, duration, word count). Not from the Whisper API; see **Analysis pipeline & metrics** below for how it's computed.
+- **Model** – Name of the model used (e.g. whisper-1, gpt-4o-transcribe-diarize).
+
+If the clip is longer than the recommended limit (configurable, default 15 minutes), a warning appears above the stats; the result is still shown.
+
+### Results: Transcription card
+
+- The full **transcription** is shown. With **With speakers** you get labels like "Speaker 1: …" and "Speaker 2: …" when the model detects multiple speakers.
+- **Copy** puts the full transcript on the clipboard (with a short "Copied" message).
+- **Download .txt** saves the plain transcript. **Download .json** saves the full API response (text, segments, all analysis fields). Filenames are based on the original file name or "recording".
+
+### Recent
+
+- The last **3** analyses are listed below the result. Each line shows file name (or "recording.webm"), duration, and word count. **Click a line** to reload that result (analysis + transcription) without calling the API again. Data is stored in the browser's **localStorage** and survives refresh; **Clear recent** removes all entries.
+
+### End-to-end request path
+
+1. User clicks **Upload and Analyze** (file or recording).
+2. The Blazor UI calls **AudioApiClient.AnalyzeDetailsAsync** with the audio stream, file name, content type, and diarize flag. No component builds URLs or uses `HttpClient` directly.
+3. The API receives `POST /api/audio/analyze/details` with `multipart/form-data` and **audioFile**. The controller validates the file and delegates to **IAudioAnalysisService.AnalyzeAsync**.
+4. The analysis service: (a) tries to read **duration** from the stream (WAV supported; others use provider duration), (b) sends the stream to the **transcription provider** (OpenAI), (c) computes **word count**, **language** (provider or heuristic), and **confidence** (heuristic), (d) builds the response DTO.
+5. The client receives the JSON, shows the Analysis and Transcription cards and updates Recent. Errors are parsed and shown as user-facing messages.
 
 ---
 
@@ -238,7 +282,3 @@ Base URL when running locally: **http://localhost:5200**.
 - **Recent not persisting** – Recent is stored in the browser’s localStorage for this origin. Private/incognito or clearing site data will remove it. Use **Clear recent** to wipe it manually.
 
 ---
-
-## License / status
-
-Initial version for demo and local use. Adjust config and CORS for your environment before any production or shared deployment.
