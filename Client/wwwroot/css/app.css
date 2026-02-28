@@ -112,6 +112,26 @@ body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 0;
 /* History */
 .history-list { list-style: none; padding: 0; margin: 0.5rem 0; }
 .history-list li { margin-bottom: 0.35rem; }
+.history-sentiment { color: var(--color-text-muted); font-size: 0.9rem; }
 .link-btn { background: none; border: none; padding: 0; color: var(--color-primary); cursor: pointer; text-decoration: underline; font-size: inherit; }
 .link-btn:hover { color: var(--color-primary-hover); }
 .clear-history { margin-top: 0.5rem; font-size: 0.9rem; }
+
+/* Insight cards (Summary, Metrics, Sentiment, Topics) */
+.insight-card { margin-top: 0; }
+.insight-summary { white-space: pre-line; font-size: 0.95rem; line-height: 1.5; color: var(--color-text); }
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr)); gap: 0.75rem; }
+.metric-item { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 0.75rem; }
+.metric-item-full { grid-column: 1 / -1; }
+.metric-label { display: block; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-text-muted); margin-bottom: 0.25rem; }
+.metric-value { font-size: 1rem; font-weight: 600; color: var(--color-text); }
+.progress-wrap { height: 0.5rem; background: var(--color-border); border-radius: var(--radius-sm); overflow: hidden; margin: 0.35rem 0; }
+.progress-bar { height: 100%; background: var(--color-primary); border-radius: var(--radius-sm); transition: width 0.2s ease; }
+.clarity-notes { font-size: 0.85rem; color: var(--color-text-muted); margin: 0.75rem 0 0; line-height: 1.4; }
+.sentiment-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.sentiment-label { font-weight: 600; min-width: 5rem; color: var(--color-text); }
+.sentiment-bar-wrap { flex: 1; min-width: 6rem; height: 0.5rem; background: var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
+.sentiment-bar { height: 100%; background: var(--color-primary); border-radius: var(--radius-sm); transition: width 0.2s ease; }
+.sentiment-score { font-size: 0.9rem; color: var(--color-text-muted); }
+.topics-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.topic-chip { display: inline-block; padding: 0.35rem 0.75rem; background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 999px; font-size: 0.9rem; color: var(--color-text); }

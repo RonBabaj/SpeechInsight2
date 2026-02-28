@@ -1,5 +1,12 @@
-// Reusable, testable text analysis for transcription: word count, language heuristic, and confidence heuristic.
-// Used by AudioAnalysisService to produce server-side metrics. See README "Analysis pipeline & metrics" for behavior.
+// ---------------------------------------------------------------------------------------------------------------------
+// TranscriptionTextAnalyzer: reusable, testable text analysis for transcription.
+// - Word count: tokenization with filler artifacts (um, uh, [inaudible], etc.) excluded.
+// - Filler count: used for clarity scoring (ComputeClarityEstimate).
+// - Language heuristic: script-based (Hebrew/Cyrillic/Latin) when provider does not supply language.
+// - Confidence heuristic: evidence-based 0–1 from length, duration, word count (see README).
+// - Clarity estimate: 0–100 score and notes from speaking rate and filler ratio; described as estimate only.
+// Used by AudioAnalysisService. See README "Analysis pipeline & metrics" and "Analysis and insights: feature overview".
+// ---------------------------------------------------------------------------------------------------------------------
 namespace SpeechInsight.Api.Services;
 
 public static class TranscriptionTextAnalyzer
@@ -17,6 +24,21 @@ public static class TranscriptionTextAnalyzer
         {
             var trimmed = t.Trim();
             if (trimmed.Length > 0 && !IsFillerArtifact(trimmed))
+                count++;
+        }
+        return count;
+    }
+
+    /// <summary>Count of filler-like tokens (um, uh, eh, [inaudible], etc.) for clarity scoring.</summary>
+    public static int CountFillerWords(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return 0;
+        var tokens = text.Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries);
+        var count = 0;
+        foreach (var t in tokens)
+        {
+            var trimmed = t.Trim();
+            if (trimmed.Length > 0 && IsFillerArtifact(trimmed))
                 count++;
         }
         return count;
@@ -89,5 +111,48 @@ public static class TranscriptionTextAnalyzer
         if (transcriptionLength < 10)
             score *= 0.6;
         return Math.Clamp(score, 0.0, 1.0);
+    }
+
+    /// <summary>
+    /// Computes a clarity score 0–100 and short notes from speaking rate and filler ratio.
+    /// This is an estimate for delivery clarity (pace and fillers), not a judgment of content.
+    /// </summary>
+    /// <param name="wordCount">Total meaningful words (e.g. from CountWords).</param>
+    /// <param name="durationSeconds">Audio duration when available; used for words-per-minute.</param>
+    /// <param name="fillerCount">Number of filler tokens (e.g. from CountFillerWords).</param>
+    /// <returns>ClarityScore 0–100 and ClarityNotes (e.g. "Estimate based on pace and filler words (some fillers). Not a judgment of content.").</returns>
+    public static (int ClarityScore, string ClarityNotes) ComputeClarityEstimate(
+        int wordCount,
+        double? durationSeconds,
+        int fillerCount)
+    {
+        if (wordCount <= 0)
+            return (0, "No speech detected. Clarity is an estimate based on word count, pace, and fillers.");
+
+        double? wordsPerMinute = null;
+        if (durationSeconds.HasValue && durationSeconds.Value > 0)
+            wordsPerMinute = wordCount / (durationSeconds.Value / 60.0);
+
+        int score = 100;
+        var reasons = new List<string>();
+
+        if (fillerCount > 0)
+        {
+            var fillerRatio = (double)fillerCount / wordCount;
+            if (fillerRatio > 0.15) { score -= 25; reasons.Add("many fillers"); }
+            else if (fillerRatio > 0.08) { score -= 15; reasons.Add("some fillers"); }
+        }
+
+        if (wordsPerMinute.HasValue)
+        {
+            if (wordsPerMinute.Value < 60) { score -= 10; reasons.Add("slow pace"); }
+            else if (wordsPerMinute.Value > 180) { score -= 5; reasons.Add("fast pace"); }
+        }
+
+        score = Math.Clamp(score, 0, 100);
+        var notes = reasons.Count > 0
+            ? $"Estimate based on pace and filler words ({string.Join(", ", reasons)}). Not a judgment of content."
+            : "Estimate based on pace and filler words. Not a judgment of content.";
+        return (score, notes);
     }
 }

@@ -1,0 +1,24 @@
+@* TopicsCard: displays up to 5 topic/keyword chips from AI insights. Data from AnalyzeDetailsResponseDto.Topics.
+   Card hidden when Topics is null or empty. *@
+@namespace SpeechInsight.Client.Components
+
+@if (Topics != null && Topics.Count > 0)
+{
+    <div class="card insight-card">
+        <h2 class="card-title">Topics</h2>
+        <div class="topics-chips">
+            @foreach (var topic in Topics)
+            {
+                if (!string.IsNullOrWhiteSpace(topic))
+                {
+                    <span class="topic-chip">@topic</span>
+                }
+            }
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>Topic strings from the analyze/details API (max 5). Card hidden when null or empty.</summary>
+    [Parameter] public List<string>? Topics { get; set; }
+}
