@@ -67,10 +67,11 @@ public class AudioController : ControllerBase
         var validation = ValidateFile(audioFile);
         if (validation != null) return validation;
 
+        MemoryStream? copy = null;
         try
         {
             await using var sourceStream = audioFile!.OpenReadStream();
-            using var copy = new MemoryStream();
+            copy = new MemoryStream();
             await sourceStream.CopyToAsync(copy);
             copy.Position = 0;
 
@@ -97,6 +98,10 @@ public class AudioController : ControllerBase
         catch (HttpRequestException ex)
         {
             return Error(502, "Transcription service error.", ex.Message);
+        }
+        finally
+        {
+            copy?.Dispose();
         }
     }
 
