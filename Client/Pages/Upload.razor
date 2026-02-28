@@ -43,6 +43,14 @@
             DurationExceedsRecommended="@_durationExceedsRecommended" />
     }
 
+    @if (_details != null)
+    {
+        <SummaryCard Summary="@_details.Summary" />
+        <MetricsCard Metrics="@_details.Metrics" />
+        <SentimentCard Sentiment="@_details.Sentiment" />
+        <TopicsCard Topics="@_details.Topics" />
+    }
+
     @if (!string.IsNullOrEmpty(_transcription) && _transcriptBlocks != null)
     {
         <TranscriptionResult
@@ -59,13 +67,17 @@
     {
         <div class="card">
             <h2 class="card-title">Recent</h2>
-            <p class="hint">Saved in this browser. Click a file to view again.</p>
+            <p class="hint">Saved in this browser. Click to open a previous result.</p>
             <ul class="history-list">
                 @foreach (var h in _history)
                 {
                     <li>
                         <button type="button" class="link-btn" @onclick="() => RestoreHistory(h)">@h.FileName</button>
-                        — @(h.DurationSeconds.HasValue ? $"{h.DurationSeconds:F0}s" : "—") · @h.WordCount words
+                        — @FormatHistoryDate(h.Date) · @(h.DurationSeconds.HasValue ? $"{h.DurationSeconds:F0}s" : "—") · @h.WordCount words
+                        @if (!string.IsNullOrEmpty(h.SentimentLabel))
+                        {
+                            <span class="history-sentiment">· @h.SentimentLabel</span>
+                        }
                     </li>
                 }
             </ul>
@@ -128,12 +140,16 @@
                     foreach (var item in stored.Take(3))
                     {
                         if (item.Details == null) continue;
+                        var date = !string.IsNullOrEmpty(item.Date) && DateTime.TryParse(item.Date, out var parsed) ? (DateTime?)parsed : null;
                         _history.Add(new HistoryEntry(
                             item.FileName ?? "Unknown",
                             item.DurationSeconds,
                             item.WordCount,
                             item.Transcription ?? "",
-                            item.Details));
+                            item.Details,
+                            item.Summary,
+                            item.SentimentLabel,
+                            date));
                     }
                 }
             }
@@ -268,6 +284,18 @@
                 }
             });
         });
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(3500);
+            await InvokeAsync(() =>
+            {
+                if (_isUploading && _loadingStatus == "Transcribing…")
+                {
+                    _loadingStatus = "Analyzing…";
+                    StateHasChanged();
+                }
+            });
+        });
 
         try
         {
@@ -305,7 +333,7 @@
             _durationExceedsRecommended = details.DurationExceedsRecommended;
 
             _lastUploadFileName = fileName;
-            _history.Insert(0, new HistoryEntry(fileName, details.DurationSeconds, _stats.WordCount, _transcription, details));
+            _history.Insert(0, new HistoryEntry(fileName, details.DurationSeconds, _stats.WordCount, _transcription, details, details.Summary, details.Sentiment?.Label, DateTime.UtcNow));
             while (_history.Count > 3) _history.RemoveAt(_history.Count - 1);
             await PersistHistoryAsync();
 
@@ -321,7 +349,7 @@
         {
             _isUploading = false;
             _uploadCts = null;
-            if (_loadingStatus == "Uploading…" || _loadingStatus == "Transcribing…") _loadingStatus = null;
+            if (_loadingStatus == "Uploading…" || _loadingStatus == "Transcribing…" || _loadingStatus == "Analyzing…") _loadingStatus = null;
             StateHasChanged();
         }
     }
@@ -341,6 +369,15 @@
         StateHasChanged();
     }
 
+    private static string FormatHistoryDate(DateTime? date)
+    {
+        if (!date.HasValue) return "—";
+        var d = date.Value.ToLocalTime();
+        if (d.Date == DateTime.Today) return "Today " + d.ToString("HH:mm");
+        if (d.Date == DateTime.Today.AddDays(-1)) return "Yesterday " + d.ToString("HH:mm");
+        return d.ToString("MMM d, HH:mm");
+    }
+
     private async Task PersistHistoryAsync()
     {
         try
@@ -351,7 +388,10 @@
                 DurationSeconds = h.DurationSeconds,
                 WordCount = h.WordCount,
                 Transcription = h.Transcription,
-                Details = h.Details
+                Details = h.Details,
+                Summary = h.Summary,
+                SentimentLabel = h.SentimentLabel,
+                Date = h.Date.HasValue ? h.Date.Value.ToString("O") : null
             }).ToList();
             var json = System.Text.Json.JsonSerializer.Serialize(list, JsonOptions);
             await Js.InvokeVoidAsync("speechInsight.setLocalStorage", HistoryStorageKey, json);
@@ -459,7 +499,7 @@
         return string.IsNullOrWhiteSpace(name) ? "transcription" : name;
     }
 
-    private sealed record HistoryEntry(string FileName, double? DurationSeconds, int WordCount, string Transcription, AnalyzeDetailsResponseDto Details);
+    private sealed record HistoryEntry(string FileName, double? DurationSeconds, int WordCount, string Transcription, AnalyzeDetailsResponseDto Details, string? Summary, string? SentimentLabel, DateTime? Date);
     private sealed record StatsView(double? DurationSeconds, int WordCount, int CharCount, int SegmentCount, bool Diarized, string Model, string? DetectedLanguage, double? ConfidenceScore);
     private sealed class StoredHistoryItem
     {
@@ -468,5 +508,8 @@
         public int WordCount { get; set; }
         public string Transcription { get; set; } = "";
         public AnalyzeDetailsResponseDto? Details { get; set; }
+        public string? Summary { get; set; }
+        public string? SentimentLabel { get; set; }
+        public string? Date { get; set; }
     }
 }

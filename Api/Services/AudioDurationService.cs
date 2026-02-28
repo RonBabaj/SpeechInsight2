@@ -1,11 +1,14 @@
-// Computes duration in seconds from the audio stream by reading format headers.
-// Supports WAV: RIFF header, byte rate at offset 28, "data" chunk size. For other formats returns null;
-// the analysis pipeline then uses the transcription provider's duration (same audio, no word-count estimate).
-// Stream position is restored before return. See README "Analysis pipeline & metrics" for behavior.
+// ---------------------------------------------------------------------------------------------------------------------
+// AudioDurationService: computes audio duration in seconds from the raw stream.
+// Supports WAV only: RIFF header, byte rate at offset 28, "data" chunk size (with validation n <= stream length - 44).
+// Other formats return null; the analysis pipeline then uses the transcription provider's duration.
+// Stream position is restored before return. See README "Analysis pipeline & metrics".
+// ---------------------------------------------------------------------------------------------------------------------
 namespace SpeechInsight.Api.Services;
 
 public sealed class AudioDurationService : IAudioDurationService
 {
+    /// <inheritdoc />
     public double? GetDurationSeconds(Stream audioStream, string? contentType, string? fileName)
     {
         if (audioStream == null || !audioStream.CanRead || !audioStream.CanSeek)

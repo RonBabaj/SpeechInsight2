@@ -1,0 +1,31 @@
+@* SentimentCard: shows AI sentiment label (Positive/Neutral/Negative/Mixed) and score (-1 to 1) as a bar.
+   Data from AnalyzeDetailsResponseDto.Sentiment. Card hidden when Sentiment is null. *@
+@namespace SpeechInsight.Client.Components
+
+@if (Sentiment != null)
+{
+    <div class="card insight-card">
+        <h2 class="card-title">Sentiment</h2>
+        <div class="sentiment-row">
+            <span class="sentiment-label">@Sentiment.Label</span>
+            <div class="sentiment-bar-wrap">
+                <div class="sentiment-bar" role="progressbar"
+                     style="width: @(SentimentScorePercent)%"
+                     aria-valuenow="@SentimentScorePercent" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+            <span class="sentiment-score">@FormatScore(Sentiment.Score)</span>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>Sentiment from the analyze/details API (label + score). Card hidden when null.</summary>
+    [Parameter] public SentimentResultDto? Sentiment { get; set; }
+
+    private int SentimentScorePercent => Sentiment == null ? 50 : (int)((Sentiment.Score + 1.0) * 50);
+
+    private static string FormatScore(double score)
+    {
+        return score >= 0 ? $"+{score:F2}" : score.ToString("F2");
+    }
+}

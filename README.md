@@ -33,7 +33,9 @@ SpeechInsight2/
 │   │   ├── AudioController.cs        # /api/audio/* — validates input, delegates to IAudioAnalysisService
 │   │   └── HealthController.cs       # /api/health
 │   ├── Models/                       # Response DTOs (no anonymous objects)
-│   │   ├── AnalyzeDetailsResponseDto.cs
+│   │   ├── AnalyzeDetailsResponseDto.cs   # Full response: text, segments, summary, sentiment, topics, metrics
+│   │   ├── SentimentResultDto.cs          # Label + score for sentiment
+│   │   ├── AudioMetricsDto.cs             # Duration, word count, speaking rate, clarity score/notes
 │   │   ├── TranscriptionSegmentDto.cs
 │   │   └── AudioLimitsDto.cs
 │   ├── Options/
@@ -43,9 +45,10 @@ SpeechInsight2/
 │       ├── ITranscriptionDetailsService, OpenAITranscriptionService.cs  # OpenAI HTTP, parsing, language
 │       ├── IAudioDurationService.cs  # Duration from audio stream (WAV supported)
 │       ├── AudioDurationService.cs   # WAV header parsing; other formats → null (use provider duration)
-│       ├── TranscriptionTextAnalyzer.cs  # Word count, language heuristic, confidence heuristic
+│       ├── TranscriptionTextAnalyzer.cs  # Word count, fillers, language heuristic, confidence, clarity
+│       ├── ITextInsightsService.cs, OpenAITextInsightsService.cs  # OpenAI Chat: summary, sentiment, topics
 │       ├── IAudioAnalysisService.cs  # Orchestrates full pipeline
-│       └── AudioAnalysisService.cs   # Duration → transcription → word count, language, confidence → DTO
+│       └── AudioAnalysisService.cs   # Duration → transcription → insights → clarity/metrics → DTO
 └── Client/
     ├── Program.cs                    # Blazor host, HttpClient, AudioApiClient registration
     ├── App.razor, _Imports.razor
@@ -55,7 +58,11 @@ SpeechInsight2/
     │   └── Upload.razor              # File picker, record, model choice, stats, transcript, recent, export
     ├── Components/
     │   ├── AudioUploadCard.razor
-    │   ├── AnalysisPanel.razor       # Duration, words, chars, segments, language, confidence, model
+    │   ├── AnalysisPanel.razor       # Core stats + SummaryCard, MetricsCard, SentimentCard, TopicsCard
+    │   ├── SummaryCard.razor         # AI summary (when present)
+    │   ├── MetricsCard.razor         # Duration, words, wpm, clarity score/notes
+    │   ├── SentimentCard.razor        # Sentiment label + score bar
+    │   ├── TopicsCard.razor           # Topic chips (up to 5)
     │   ├── TranscriptionResult.razor
     │   └── ProcessingState.razor
     ├── Layout/
@@ -152,6 +159,17 @@ After a successful run, the **Analysis** card shows:
 
 If the clip is longer than the recommended limit (configurable, default 15 minutes), a warning appears above the stats; the result is still shown.
 
+### Results: Summary, Metrics, Sentiment, and Topics cards
+
+When the API returns the corresponding data, the UI shows:
+
+- **Summary** – Short AI-generated summary (2–4 sentences or bullets). Hidden if the insights call failed.
+- **Metrics** – Duration, word count, speaking rate (wpm), clarity score (0–100 bar), and clarity notes (estimate disclaimer). Always present when analysis succeeds.
+- **Sentiment** – AI sentiment label (Positive / Neutral / Negative / Mixed) and score (-1 to 1) as a bar. Hidden if insights failed.
+- **Topics** – Up to 5 topic or keyword chips from the AI. Hidden if insights failed or no topics returned.
+
+See **Analysis and insights: feature overview** for how each value is produced.
+
 ### Results: Transcription card
 
 - The full **transcription** is shown. With **With speakers** you get labels like "Speaker 1: …" and "Speaker 2: …" when the model detects multiple speakers.
@@ -167,8 +185,8 @@ If the clip is longer than the recommended limit (configurable, default 15 minut
 1. User clicks **Upload and Analyze** (file or recording).
 2. The Blazor UI calls **AudioApiClient.AnalyzeDetailsAsync** with the audio stream, file name, content type, and diarize flag. No component builds URLs or uses `HttpClient` directly.
 3. The API receives `POST /api/audio/analyze/details` with `multipart/form-data` and **audioFile**. The controller validates the file and delegates to **IAudioAnalysisService.AnalyzeAsync**.
-4. The analysis service: (a) tries to read **duration** from the stream (WAV supported; others use provider duration), (b) sends the stream to the **transcription provider** (OpenAI), (c) computes **word count**, **language** (provider or heuristic), and **confidence** (heuristic), (d) builds the response DTO.
-5. The client receives the JSON, shows the Analysis and Transcription cards and updates Recent. Errors are parsed and shown as user-facing messages.
+4. The analysis service: (a) reads **duration** from the stream (WAV) or provider, (b) sends the stream to the **transcription provider** (OpenAI), (c) computes **word count**, **language**, and **confidence**, (d) calls the **insights service** (OpenAI Chat) for **summary**, **sentiment**, and **topics**, (e) computes **clarity** and **metrics** (speaking rate, clarity score/notes), (f) builds the response DTO.
+5. The client receives the JSON, shows the Analysis, Summary, Metrics, Sentiment, Topics, and Transcription cards and updates Recent. Errors are parsed and shown as user-facing messages.
 
 ---
 
@@ -203,6 +221,27 @@ All analysis is computed **server-side**. The pipeline (see `AudioAnalysisServic
 
 ---
 
+## Analysis and insights: feature overview
+
+All values are **computed or returned by real logic**; none are hard-coded mocks. The following table describes each feature, how it is produced, and where it lives in the codebase.
+
+| Feature | Description | How it's implemented | Where (API) |
+|--------|-------------|----------------------|-------------|
+| **Duration** | Length of the audio in mm:ss. | **Real:** From WAV file header (byte rate + data chunk size) when the format is WAV; otherwise from the transcription provider (OpenAI response or segment end times). Never estimated from word count. | `AudioDurationService`, `OpenAITranscriptionService` |
+| **Word count** | Number of meaningful words in the transcript. | **Real:** Tokenization over the transcript (split on whitespace, trim, drop empties). Filler tokens (e.g. um, uh, [inaudible]) are excluded. | `TranscriptionTextAnalyzer.CountWords` |
+| **Detected language** | Language code (e.g. en, he, ru). | **Real:** From Whisper API `language` when present; otherwise a script-based heuristic (Hebrew / Cyrillic / Latin) on the transcription text. | `OpenAITranscriptionService` (parse), `TranscriptionTextAnalyzer.DetectLanguageHeuristic` |
+| **Confidence score** | 0–100% indication of transcription reliability. | **Real heuristic:** Derived from transcription length, duration, and word count (e.g. very low/high words-per-minute or very short text reduce the score). Evidence-based; not a fixed mock. | `TranscriptionTextAnalyzer.ComputeConfidenceHeuristic` |
+| **Summary** | Short summary (2–4 sentences or bullets) of what was said. | **Real:** One live call to OpenAI Chat Completions with the transcript; the model returns the summary. If the call fails, summary is omitted (no fake fallback). | `OpenAITextInsightsService.GetInsightsAsync` |
+| **Sentiment** | Overall tone: Positive / Neutral / Negative / Mixed plus a score from -1 to 1. | **Real:** Same Chat call returns `sentimentLabel` and `sentimentScore`; the API parses and maps to the four labels. | `OpenAITextInsightsService` (prompt + `ParseInsightsResponse`) |
+| **Topics** | Up to 5 short topic or keyword phrases. | **Real:** Same Chat call returns a `topics` array; the API caps to 5 and returns them as-is. | `OpenAITextInsightsService` |
+| **Speaking rate** | Words per minute (wpm). | **Real:** `wordCount / (durationSeconds / 60)` when duration is available. | `AudioAnalysisService` → `Metrics.SpeakingRate` |
+| **Clarity score** | 0–100 estimate of delivery clarity (pace and fillers). | **Real:** Filler count and speaking rate are fed into thresholds; score and a short explanation are produced. Described in the UI as an estimate, not a judgment. | `TranscriptionTextAnalyzer.CountFillerWords`, `ComputeClarityEstimate` |
+| **Clarity notes** | One or two sentences explaining the clarity estimate. | **Real:** Generated alongside the clarity score (e.g. “Estimate based on pace and filler words (some fillers). Not a judgment of content.”). | `TranscriptionTextAnalyzer.ComputeClarityEstimate` |
+
+**Pipeline order:** Duration (from stream or provider) → Transcription (Whisper) → Word count, language, confidence (local/heuristic) → Insights (summary, sentiment, topics via Chat) → Clarity and metrics (local) → Response DTO.
+
+---
+
 ## API reference
 
 Base URL when running locally: **http://localhost:5200**.
@@ -229,6 +268,10 @@ Base URL when running locally: **http://localhost:5200**.
 - `wordCount` – Server-computed word count (tokenization, filler artifacts excluded).  
 - `detectedLanguage` – Language code from provider or heuristic (e.g. `en`, `he`, `ru`), or `null`.  
 - `confidenceScore` – Heuristic confidence 0–1 (see **Analysis pipeline & metrics** above), or `null`.
+- `summary` – Short summary (2–4 sentences or bullets) from OpenAI Chat; `null` if insights call failed.
+- `sentiment` – `{ "label": "Positive"|"Neutral"|"Negative"|"Mixed", "score": number }` from Chat; `null` if insights failed.
+- `topics` – Array of up to 5 topic/keyword strings from Chat; `null` or empty if insights failed.
+- `metrics` – `{ "durationSeconds", "wordCount", "speakingRate", "clarityScore", "clarityNotes" }`; speaking rate is words per minute; clarity is an estimate (see **Analysis and insights: feature overview**).
 
 **Error responses**  
 - 400 – Invalid or missing file, wrong type, or file too large. Body: `{ "message": "...", "detail": "..." }`.  

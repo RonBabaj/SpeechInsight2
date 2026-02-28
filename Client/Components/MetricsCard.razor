@@ -1,0 +1,56 @@
+@* MetricsCard: shows duration, word count, speaking rate (wpm), clarity score (0–100 bar), and clarity notes.
+   Data comes from AnalyzeDetailsResponseDto.Metrics (non-AI). Card is hidden when Metrics is null. *@
+@namespace SpeechInsight.Client.Components
+
+@if (Metrics != null)
+{
+    <div class="card insight-card">
+        <h2 class="card-title">Metrics</h2>
+        <div class="metrics-grid">
+            @if (Metrics.DurationSeconds.HasValue)
+            {
+                <div class="metric-item">
+                    <span class="metric-label">Duration</span>
+                    <span class="metric-value">@FormatDuration(Metrics.DurationSeconds)</span>
+                </div>
+            }
+            <div class="metric-item">
+                <span class="metric-label">Words</span>
+                <span class="metric-value">@Metrics.WordCount</span>
+            </div>
+            @if (Metrics.SpeakingRate.HasValue)
+            {
+                <div class="metric-item">
+                    <span class="metric-label">Speaking rate</span>
+                    <span class="metric-value">@((int)Metrics.SpeakingRate.Value) wpm</span>
+                </div>
+            }
+            @if (Metrics.ClarityScore.HasValue)
+            {
+                <div class="metric-item metric-item-full">
+                    <span class="metric-label">Clarity (estimate)</span>
+                    <div class="progress-wrap">
+                        <div class="progress-bar" role="progressbar" style="width: @(Metrics.ClarityScore.Value)%" aria-valuenow="@Metrics.ClarityScore" aria-valuemin="0" aria-valuemax="100"></div>
+                    </div>
+                    <span class="metric-value">@Metrics.ClarityScore.Value%</span>
+                </div>
+            }
+        </div>
+        @if (!string.IsNullOrWhiteSpace(Metrics.ClarityNotes))
+        {
+            <p class="clarity-notes">@Metrics.ClarityNotes</p>
+        }
+    </div>
+}
+
+@code {
+    /// <summary>Metrics from the analyze/details API (duration, word count, speaking rate, clarity). Card hidden when null.</summary>
+    [Parameter] public AudioMetricsDto? Metrics { get; set; }
+
+    private static string FormatDuration(double? seconds)
+    {
+        if (!seconds.HasValue || seconds.Value < 0) return "—";
+        var t = TimeSpan.FromSeconds(seconds.Value);
+        return $"{(int)t.TotalMinutes}:{t.Seconds:D2}";
+    }
+}

@@ -1,0 +1,16 @@
+@* SummaryCard: displays the AI-generated summary (2–4 sentences or bullets) when present.
+   Shown on the Upload page after analysis; hidden when Summary is null or empty. *@
+@namespace SpeechInsight.Client.Components
+
+@if (!string.IsNullOrWhiteSpace(Summary))
+{
+    <div class="card insight-card">
+        <h2 class="card-title">Summary</h2>
+        <div class="insight-summary">@Summary</div>
+    </div>
+}
+
+@code {
+    /// <summary>Summary text from the analyze/details API (AI insights). Card is hidden when null or empty.</summary>
+    [Parameter] public string? Summary { get; set; }
+}

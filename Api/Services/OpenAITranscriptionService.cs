@@ -154,6 +154,10 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             Language: language);
     }
 
+    /// <summary>
+    /// Sends the audio stream to OpenAI /v1/audio/transcriptions. Uses a non-disposing wrapper around
+    /// <paramref name="audioStream"/> so the caller retains ownership and can dispose the stream.
+    /// </summary>
     private async Task<(int statusCode, string body)> CallOpenAIAsync(
         Stream audioStream,
         string fileName,
@@ -168,7 +172,8 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
         using var content = new MultipartFormDataContent();
 
-        var fileContent = new StreamContent(audioStream);
+        // Wrap so MultipartFormDataContent disposal does not dispose the caller's stream (controller owns it).
+        var fileContent = new StreamContent(new LeaveOpenStream(audioStream));
         if (!string.IsNullOrWhiteSpace(contentType))
             fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
 
@@ -186,5 +191,35 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         using var response = await _httpClient.SendAsync(request);
         var body = await response.Content.ReadAsStringAsync();
         return ((int)response.StatusCode, body);
+    }
+
+    /// <summary>Stream wrapper that does not dispose the underlying stream when this wrapper is disposed. Caller retains ownership.</summary>
+    private sealed class LeaveOpenStream : Stream
+    {
+        private readonly Stream _inner;
+
+        public LeaveOpenStream(Stream inner) => _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => _inner.CanSeek;
+        public override bool CanWrite => _inner.CanWrite;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+
+        public override void Flush() => _inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+        public override void SetLength(long value) => _inner.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => _inner.ReadAsync(buffer, offset, count, cancellationToken);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            => _inner.ReadAsync(buffer, cancellationToken);
+
+        protected override void Dispose(bool disposing)
+        {
+            // Do not dispose _inner; caller owns the stream.
+        }
     }
 }
