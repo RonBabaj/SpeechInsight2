@@ -59,7 +59,7 @@ public static class TranscriptionTextAnalyzer
     /// <summary>
     /// Heuristic confidence 0–1, computed from evidence (transcription length, duration, word count).
     /// Not a mock: the value changes per run. See README "Analysis pipeline & metrics" for the exact patterns.
-    /// Low WPM (&lt;20) → 0.7; high WPM (&gt;250) → 0.85; very short text (&lt;10 chars) → 0.6; empty/error → 0.
+    /// Low WPM (&lt;20) → 0.7; high WPM (&gt;250) → 0.85; very short text (&lt;10 chars) → 0.6; empty/zero words/error → 0.
     /// </summary>
     /// <param name="transcriptionLength">Length of full transcription text.</param>
     /// <param name="durationSeconds">Audio duration in seconds (optional).</param>
@@ -74,7 +74,7 @@ public static class TranscriptionTextAnalyzer
         if (hadProviderError || (durationSeconds.HasValue && durationSeconds.Value <= 0))
             return 0.0;
 
-        if (transcriptionLength == 0)
+        if (transcriptionLength == 0 || wordCount == 0)
             return 0.0;
 
         double score = 1.0;

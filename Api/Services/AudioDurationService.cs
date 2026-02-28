@@ -77,7 +77,8 @@ public sealed class AudioDurationService : IAudioDurationService
                 if (s.Read(dataLenBuf, 0, 4) == 4)
                 {
                     var n = dataLenBuf[0] | (dataLenBuf[1] << 8) | (dataLenBuf[2] << 16) | (dataLenBuf[3] << 24);
-                    if (n > 0 && n <= s.Length)
+                    var maxDataSize = s.Length - 44;
+                    if (n > 0 && n <= maxDataSize)
                         dataSize = n;
                     else
                         dataSize = s.Length - 44;
