@@ -1,0 +1,14 @@
+@namespace SpeechInsight.Client.Components
+
+@if (Visible)
+{
+    <div class="card processing-state" role="status" aria-live="polite">
+        <div class="spinner"></div>
+        <span class="loading-text">@StatusText</span>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public string StatusText { get; set; } = "Uploading…";
+}

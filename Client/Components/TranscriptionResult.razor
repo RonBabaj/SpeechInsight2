@@ -1,0 +1,40 @@
+@namespace SpeechInsight.Client.Components
+
+<div class="card transcription-result-card" id="transcription-result">
+    <h2 class="card-title">Transcription</h2>
+    <div class="transcript-container">
+        <div class="transcript-inner">
+            @foreach (var block in Blocks)
+            {
+                if (block.Speaker != null)
+                {
+                    <span class="speaker-label">@block.Speaker:</span><span class="transcript-text">@block.Text</span>
+                }
+                else
+                {
+                    <span class="transcript-text">@block.Text</span>
+                }
+                <br />
+            }
+        </div>
+    </div>
+    <div class="actions">
+        <button type="button" class="btn-secondary" @onclick="OnCopy" disabled="@IsProcessing">Copy</button>
+        <button type="button" class="btn-secondary" @onclick="OnDownloadTxt" disabled="@IsProcessing">Download .txt</button>
+        <button type="button" class="btn-secondary" @onclick="OnDownloadJson" disabled="@(IsProcessing || !AllowJsonDownload)">Download .json</button>
+    </div>
+    @if (!string.IsNullOrEmpty(CopyHint))
+    {
+        <div class="hint @(CopyHint.StartsWith("Copied") ? "copy-success" : "")">@CopyHint</div>
+    }
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<(string? Speaker, string Text)> Blocks { get; set; } = Array.Empty<(string?, string)>();
+    [Parameter] public bool IsProcessing { get; set; }
+    [Parameter] public bool AllowJsonDownload { get; set; }
+    [Parameter] public string? CopyHint { get; set; }
+    [Parameter] public EventCallback OnCopy { get; set; }
+    [Parameter] public EventCallback OnDownloadTxt { get; set; }
+    [Parameter] public EventCallback OnDownloadJson { get; set; }
+}

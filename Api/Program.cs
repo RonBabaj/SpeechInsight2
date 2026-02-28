@@ -10,8 +10,21 @@ builder.Services.Configure<TranscriptionOptions>(builder.Configuration.GetSectio
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddHttpClient();
-builder.Services.AddScoped<ITranscriptionService, OpenAITranscriptionService>();
-builder.Services.AddScoped<ITranscriptionDetailsService, OpenAITranscriptionService>();
+
+// Transcription provider is swappable via Transcription:Provider (e.g. "OpenAI"). Add new providers here when needed.
+var transcriptionProvider = builder.Configuration.GetValue<string>("Transcription:Provider") ?? "OpenAI";
+if (string.Equals(transcriptionProvider, "OpenAI", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddScoped<ITranscriptionService, OpenAITranscriptionService>();
+    builder.Services.AddScoped<ITranscriptionDetailsService, OpenAITranscriptionService>();
+}
+else
+{
+    throw new InvalidOperationException($"Unknown transcription provider: {transcriptionProvider}. Supported: OpenAI.");
+}
+
+builder.Services.AddScoped<IAudioDurationService, AudioDurationService>();
+builder.Services.AddScoped<IAudioAnalysisService, AudioAnalysisService>();
 
 builder.Services.AddCors(options =>
 {

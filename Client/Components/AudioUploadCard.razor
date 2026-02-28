@@ -1,0 +1,77 @@
+@namespace SpeechInsight.Client.Components
+
+<div class="card audio-upload-card">
+    <h2 class="card-title">Upload audio</h2>
+    <div class="upload-row">
+        <InputFile OnChange="OnFileSelected" accept=".mp3,.mpga,.m4a,.wav,.webm,.mp4,.mpeg,audio/*" disabled="@IsRecording" />
+        @if (SelectedFile != null)
+        {
+            <span class="file-info">@SelectedFile.Name (@FormatFileSize(SelectedFile.Size))</span>
+        }
+    </div>
+    <div class="record-row">
+        @if (IsRecording)
+        {
+            <span class="file-info recording-active">Recording…</span>
+            <button type="button" class="btn-secondary" @onclick="OnStopRecording" disabled="@IsProcessing">Stop recording</button>
+        }
+        else
+        {
+            <button type="button" class="btn-secondary" @onclick="OnStartRecording" disabled="@(IsProcessing || SelectedFile != null)">
+                Record from microphone
+            </button>
+            @if (RecordedSizeBytes > 0)
+            {
+                <span class="file-info">Recording ready (@FormatFileSize(RecordedSizeBytes))</span>
+            }
+        }
+    </div>
+    @if (!string.IsNullOrEmpty(ValidationError))
+    {
+        <p class="error" role="alert">@ValidationError</p>
+    }
+    <div class="model-row">
+        <label for="model-select">Model</label>
+        <select id="model-select" value="@ModelChoice" @onchange="OnModelChanged" disabled="@IsProcessing">
+            <option value="diarize">With speakers (recommended)</option>
+            <option value="basic">Basic (Whisper — cheaper)</option>
+        </select>
+    </div>
+    <p class="cost-hint">Basic is cheaper; “With speakers” may cost more per minute.</p>
+    <div class="button-row">
+        <button type="button" class="btn-primary" @onclick="OnSubmit" disabled="@(IsProcessing || !HasAudioSource)">
+            Upload and analyze
+        </button>
+        @if (IsProcessing)
+        {
+            <button type="button" class="btn-secondary" @onclick="OnCancel">Cancel</button>
+        }
+    </div>
+    @if (!HasAudioSource)
+    {
+        <p class="hint">Select an audio file or record from your microphone to enable upload.</p>
+    }
+</div>
+
+@code {
+    [Parameter] public IBrowserFile? SelectedFile { get; set; }
+    [Parameter] public string ModelChoice { get; set; } = "diarize";
+    [Parameter] public bool IsProcessing { get; set; }
+    [Parameter] public bool IsRecording { get; set; }
+    [Parameter] public long RecordedSizeBytes { get; set; }
+    [Parameter] public bool HasAudioSource { get; set; }
+    [Parameter] public string? ValidationError { get; set; }
+    [Parameter] public EventCallback<InputFileChangeEventArgs> OnFileSelected { get; set; }
+    [Parameter] public EventCallback<ChangeEventArgs> OnModelChanged { get; set; }
+    [Parameter] public EventCallback OnStartRecording { get; set; }
+    [Parameter] public EventCallback OnStopRecording { get; set; }
+    [Parameter] public EventCallback OnSubmit { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / (1024.0 * 1024.0):F1} MB";
+    }
+}

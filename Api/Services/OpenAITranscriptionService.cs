@@ -1,4 +1,5 @@
-// Calls OpenAI /v1/audio/transcriptions (raw HttpClient). Supports text, verbose_json, and diarized_json; parses duration from usage or segments.
+// Calls OpenAI /v1/audio/transcriptions (raw HttpClient). Supports text, verbose_json, and diarized_json.
+// Parses duration (usage/segments) and language (when present in response) for the analysis pipeline.
 using System.Net.Http.Headers;
 using System.Net;
 using System.Text.Json;
@@ -25,7 +26,8 @@ public sealed record TranscriptionDetails(
     string Model,
     double? DurationSeconds,
     IReadOnlyList<TranscriptionSegment> Segments,
-    bool Diarized);
+    bool Diarized,
+    string? Language = null);
 
 public interface ITranscriptionDetailsService
 {
@@ -81,6 +83,7 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         var root = doc.RootElement;
 
         var text = root.TryGetProperty("text", out var textEl) ? (textEl.GetString() ?? "") : "";
+        string? language = root.TryGetProperty("language", out var langEl) ? langEl.GetString() : null;
         double? duration = null;
         if (root.TryGetProperty("duration", out var rootDurationEl) &&
             rootDurationEl.ValueKind == JsonValueKind.Number &&
@@ -147,7 +150,8 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             Model: model,
             DurationSeconds: duration,
             Segments: segments,
-            Diarized: diarize);
+            Diarized: diarize,
+            Language: language);
     }
 
     private async Task<(int statusCode, string body)> CallOpenAIAsync(

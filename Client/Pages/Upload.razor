@@ -1,0 +1,472 @@
+@page "/upload"
+@layout MainLayout
+@inject AudioApiClient AudioApi
+@inject IJSRuntime Js
+
+<PageTitle>SpeechInsight — Upload &amp; transcribe</PageTitle>
+
+<div class="upload-page">
+    <AudioUploadCard
+        SelectedFile="@_selectedFile"
+        ModelChoice="@_modelChoice"
+        IsProcessing="@_isUploading"
+        IsRecording="@_isRecording"
+        RecordedSizeBytes="@(_recordedAudioBytes?.Length ?? 0)"
+        HasAudioSource="@(_selectedFile != null || (_recordedAudioBytes?.Length ?? 0) > 0)"
+        ValidationError="@_fileValidationError"
+        OnFileSelected="OnFileSelected"
+        OnModelChanged="OnModelChanged"
+        OnStartRecording="StartRecording"
+        OnStopRecording="StopRecording"
+        OnSubmit="HandleSubmit"
+        OnCancel="CancelUpload" />
+
+    <ProcessingState Visible="@(_isUploading || !string.IsNullOrEmpty(_loadingStatus))" StatusText="@(_loadingStatus ?? "Uploading…")" />
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <div class="card error-card" role="alert">
+            <strong>Something went wrong</strong><br />@_error
+        </div>
+    }
+
+    @if (_stats != null)
+    {
+        <AnalysisPanel
+            DurationSeconds="@_stats.DurationSeconds"
+            WordCount="@_stats.WordCount"
+            CharCount="@_stats.CharCount"
+            SegmentCount="@_stats.SegmentCount"
+            DetectedLanguage="@_stats.DetectedLanguage"
+            ConfidenceScore="@_stats.ConfidenceScore"
+            Model="@_stats.Model"
+            DurationExceedsRecommended="@_durationExceedsRecommended" />
+    }
+
+    @if (!string.IsNullOrEmpty(_transcription) && _transcriptBlocks != null)
+    {
+        <TranscriptionResult
+            Blocks="@_transcriptBlocks"
+            IsProcessing="@_isUploading"
+            AllowJsonDownload="@(_details != null)"
+            CopyHint="@_actionHint"
+            OnCopy="CopyTranscript"
+            OnDownloadTxt="DownloadTxt"
+            OnDownloadJson="DownloadJson" />
+    }
+
+    @if (_history.Count > 0)
+    {
+        <div class="card">
+            <h2 class="card-title">Recent</h2>
+            <p class="hint">Saved in this browser. Click a file to view again.</p>
+            <ul class="history-list">
+                @foreach (var h in _history)
+                {
+                    <li>
+                        <button type="button" class="link-btn" @onclick="() => RestoreHistory(h)">@h.FileName</button>
+                        — @(h.DurationSeconds.HasValue ? $"{h.DurationSeconds:F0}s" : "—") · @h.WordCount words
+                    </li>
+                }
+            </ul>
+            <button type="button" class="btn-secondary clear-history" @onclick="ClearHistoryAsync">Clear recent</button>
+        </div>
+    }
+</div>
+
+@code {
+    private const long MaxFileSizeBytes = 25 * 1024 * 1024;
+    private const string HistoryStorageKey = "SpeechInsight_Recent";
+    private const string ModelStorageKey = "SpeechInsight_Model";
+    private static readonly string[] AllowedExtensions = { ".mp3", ".mpga", ".m4a", ".wav", ".webm", ".mp4", ".mpeg" };
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+    };
+
+    private IBrowserFile? _selectedFile;
+    private string? _transcription;
+    private List<(string? Speaker, string Text)>? _transcriptBlocks;
+    private string? _error;
+    private string? _fileValidationError;
+    private bool _isUploading;
+    private string _modelChoice = "diarize";
+    private bool _durationExceedsRecommended;
+    private StatsView? _stats;
+    private AnalyzeDetailsResponseDto? _details;
+    private string? _actionHint;
+    private int _copyMessageGeneration;
+    private readonly List<HistoryEntry> _history = new();
+    private CancellationTokenSource? _uploadCts;
+    private string? _loadingStatus;
+    private bool _jsReady;
+    private bool _isRecording;
+    private byte[]? _recordedAudioBytes;
+    private string? _lastUploadFileName;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _jsReady) return;
+        try
+        {
+            var savedModel = await Js.InvokeAsync<string?>("speechInsight.getLocalStorage", ModelStorageKey);
+            if (savedModel == "basic" || savedModel == "diarize")
+                _modelChoice = savedModel;
+        }
+        catch { /* JS not ready or localStorage unavailable */ }
+
+        try
+        {
+            var json = await Js.InvokeAsync<string?>("speechInsight.getLocalStorage", HistoryStorageKey);
+            if (!string.IsNullOrWhiteSpace(json))
+            {
+                var stored = System.Text.Json.JsonSerializer.Deserialize<List<StoredHistoryItem>>(json, JsonOptions);
+                if (stored != null)
+                {
+                    _history.Clear();
+                    foreach (var item in stored.Take(3))
+                    {
+                        if (item.Details == null) continue;
+                        _history.Add(new HistoryEntry(
+                            item.FileName ?? "Unknown",
+                            item.DurationSeconds,
+                            item.WordCount,
+                            item.Transcription ?? "",
+                            item.Details));
+                    }
+                }
+            }
+        }
+        catch { /* JS not ready or localStorage unavailable */ }
+
+        _jsReady = true;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnModelChanged(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        if (value == "basic" || value == "diarize")
+        {
+            _modelChoice = value;
+            try { await Js.InvokeVoidAsync("speechInsight.setLocalStorage", ModelStorageKey, value); } catch { }
+        }
+    }
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        _selectedFile = e.File;
+        _recordedAudioBytes = null;
+        _error = null;
+        _fileValidationError = null;
+        _transcription = null;
+        _transcriptBlocks = null;
+        _stats = null;
+        _details = null;
+        _actionHint = null;
+
+        if (_selectedFile == null) return;
+        var ext = System.IO.Path.GetExtension(_selectedFile.Name);
+        if (string.IsNullOrEmpty(ext) || !AllowedExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase))
+        {
+            _fileValidationError = "Please choose an audio file (e.g. MP3, WAV, M4A). Max size: 25 MB.";
+            _selectedFile = null;
+            return;
+        }
+        if (_selectedFile.Size > MaxFileSizeBytes)
+        {
+            _fileValidationError = "File is too large. Maximum size is 25 MB.";
+            _selectedFile = null;
+            return;
+        }
+    }
+
+    private async Task StartRecording()
+    {
+        _error = null;
+        _fileValidationError = null;
+        _selectedFile = null;
+        _recordedAudioBytes = null;
+        try
+        {
+            await Js.InvokeVoidAsync("speechInsight.recording.start");
+            _isRecording = true;
+        }
+        catch (Exception ex)
+        {
+            _error = "Microphone access failed. Please allow microphone permission and try again. " + ex.Message;
+        }
+        StateHasChanged();
+    }
+
+    private async Task StopRecording()
+    {
+        try
+        {
+            var base64 = await Js.InvokeAsync<string>("speechInsight.recording.stop");
+            _recordedAudioBytes = string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
+            if ((_recordedAudioBytes?.Length ?? 0) > MaxFileSizeBytes)
+            {
+                _fileValidationError = "Recording is too long. Maximum size is 25 MB.";
+                _recordedAudioBytes = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = "Recording failed. " + ex.Message;
+        }
+        _isRecording = false;
+        StateHasChanged();
+    }
+
+    private List<(string? Speaker, string Text)> GetTranscriptBlocks()
+    {
+        if (string.IsNullOrEmpty(_transcription)) return new List<(string?, string)>();
+        var list = new List<(string?, string)>();
+        foreach (var p in _transcription!.Split("\n\n", StringSplitOptions.None))
+        {
+            var trimmed = p.Trim();
+            if (string.IsNullOrEmpty(trimmed)) continue;
+            var colon = trimmed.IndexOf(": ", StringComparison.Ordinal);
+            if (colon > 0 && trimmed.StartsWith("Speaker ", StringComparison.OrdinalIgnoreCase))
+                list.Add((trimmed[..colon], trimmed[(colon + 2)..].Trim()));
+            else
+                list.Add((null, trimmed));
+        }
+        return list;
+    }
+
+    private async Task HandleSubmit()
+    {
+        var hasFile = _selectedFile != null;
+        var hasRecording = (_recordedAudioBytes?.Length ?? 0) > 0;
+        if (!hasFile && !hasRecording) { _error = "Please select an audio file or record from the microphone."; return; }
+
+        _error = null;
+        _fileValidationError = null;
+        _transcription = null;
+        _transcriptBlocks = null;
+        _stats = null;
+        _details = null;
+        _actionHint = null;
+        _durationExceedsRecommended = false;
+        _uploadCts = new CancellationTokenSource();
+        _isUploading = true;
+        _loadingStatus = "Uploading…";
+        StateHasChanged();
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(1600);
+            await InvokeAsync(() =>
+            {
+                if (_isUploading && _loadingStatus == "Uploading…")
+                {
+                    _loadingStatus = "Transcribing…";
+                    StateHasChanged();
+                }
+            });
+        });
+
+        try
+        {
+            Stream stream;
+            string fileName;
+            string? contentType;
+            if (hasRecording && _recordedAudioBytes != null)
+            {
+                stream = new MemoryStream(_recordedAudioBytes);
+                fileName = "recording.webm";
+                contentType = "audio/webm";
+            }
+            else
+            {
+                stream = _selectedFile!.OpenReadStream(maxAllowedSize: MaxFileSizeBytes);
+                fileName = _selectedFile.Name;
+                contentType = _selectedFile.ContentType;
+            }
+
+            await using var _ = stream;
+            var details = await AudioApi.AnalyzeDetailsAsync(
+                stream,
+                fileName,
+                contentType,
+                _modelChoice == "diarize",
+                _uploadCts.Token);
+
+            _loadingStatus = "Done";
+            StateHasChanged();
+
+            _details = details;
+            _transcription = FormatTranscript(details);
+            _transcriptBlocks = GetTranscriptBlocks();
+            _stats = BuildStats(details);
+            _durationExceedsRecommended = details.DurationExceedsRecommended;
+
+            _lastUploadFileName = fileName;
+            _history.Insert(0, new HistoryEntry(fileName, details.DurationSeconds, _stats.WordCount, _transcription, details));
+            while (_history.Count > 3) _history.RemoveAt(_history.Count - 1);
+            await PersistHistoryAsync();
+
+            _recordedAudioBytes = null;
+            await Task.Delay(400);
+            _loadingStatus = null;
+            try { await Js.InvokeVoidAsync("speechInsight.scrollToId", "transcription-result"); } catch { }
+        }
+        catch (OperationCanceledException) { _error = "Upload was cancelled."; }
+        catch (AudioApiException ex) { _error = ex.Message; }
+        catch (Exception ex) { _error = "Upload failed. Please check your connection and try again. " + ex.Message; }
+        finally
+        {
+            _isUploading = false;
+            _uploadCts = null;
+            if (_loadingStatus == "Uploading…" || _loadingStatus == "Transcribing…") _loadingStatus = null;
+            StateHasChanged();
+        }
+    }
+
+    private void CancelUpload() => _uploadCts?.Cancel();
+
+    private void RestoreHistory(HistoryEntry entry)
+    {
+        _transcription = entry.Transcription;
+        _details = entry.Details;
+        _lastUploadFileName = entry.FileName;
+        _stats = BuildStats(entry.Details);
+        _durationExceedsRecommended = entry.Details.DurationExceedsRecommended;
+        _transcriptBlocks = GetTranscriptBlocks();
+        _error = null;
+        _actionHint = null;
+        StateHasChanged();
+    }
+
+    private async Task PersistHistoryAsync()
+    {
+        try
+        {
+            var list = _history.Select(h => new StoredHistoryItem
+            {
+                FileName = h.FileName,
+                DurationSeconds = h.DurationSeconds,
+                WordCount = h.WordCount,
+                Transcription = h.Transcription,
+                Details = h.Details
+            }).ToList();
+            var json = System.Text.Json.JsonSerializer.Serialize(list, JsonOptions);
+            await Js.InvokeVoidAsync("speechInsight.setLocalStorage", HistoryStorageKey, json);
+        }
+        catch { }
+    }
+
+    private async Task ClearHistoryAsync()
+    {
+        _history.Clear();
+        try { await Js.InvokeVoidAsync("speechInsight.setLocalStorage", HistoryStorageKey, ""); } catch { }
+        StateHasChanged();
+    }
+
+    private static string FormatTranscript(AnalyzeDetailsResponseDto details)
+    {
+        if (details.Segments is not { Count: > 0 }) return details.Text ?? "";
+        var speakerMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var speakerCounter = 0;
+        string Normalize(string? raw)
+        {
+            var key = string.IsNullOrWhiteSpace(raw) ? "unknown" : raw.Trim();
+            if (!speakerMap.TryGetValue(key, out var mapped))
+            {
+                speakerCounter++;
+                mapped = $"Speaker {speakerCounter}";
+                speakerMap[key] = mapped;
+            }
+            return mapped;
+        }
+        var blocks = new List<(string Speaker, string Text)>();
+        foreach (var s in details.Segments)
+        {
+            var t = (s.Text ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(t)) continue;
+            var speaker = Normalize(s.Speaker);
+            if (blocks.Count > 0 && blocks[^1].Speaker == speaker)
+                blocks[^1] = (speaker, $"{blocks[^1].Text} {t}".Trim());
+            else
+                blocks.Add((speaker, t));
+        }
+        return string.Join("\n\n", blocks.Select(b => $"{b.Speaker}: {b.Text}").Where(x => !string.IsNullOrWhiteSpace(x)));
+    }
+
+    private static StatsView BuildStats(AnalyzeDetailsResponseDto details)
+    {
+        var text = details.Text ?? "";
+        var wordCount = details.WordCount > 0 ? details.WordCount : text.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
+        return new StatsView(details.DurationSeconds, wordCount, text.Length, details.Segments?.Count ?? 0, details.Diarized, details.Model ?? "—", details.DetectedLanguage, details.ConfidenceScore);
+    }
+
+    private async Task CopyTranscript()
+    {
+        if (string.IsNullOrEmpty(_transcription)) return;
+        _actionHint = null;
+        _copyMessageGeneration++;
+        var thisCopyId = _copyMessageGeneration;
+        StateHasChanged();
+        try
+        {
+            await Js.InvokeVoidAsync("speechInsight.copyText", _transcription);
+            _actionHint = "Copied to clipboard.";
+            StateHasChanged();
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2500);
+                await InvokeAsync(() =>
+                {
+                    if (thisCopyId == _copyMessageGeneration && _actionHint == "Copied to clipboard.")
+                    {
+                        _actionHint = null;
+                        StateHasChanged();
+                    }
+                });
+            });
+        }
+        catch
+        {
+            _actionHint = "Copy failed. Please check browser permissions.";
+            StateHasChanged();
+        }
+    }
+
+    private async Task DownloadTxt()
+    {
+        if (string.IsNullOrEmpty(_transcription)) return;
+        var baseName = GetSafeBaseFileName(_selectedFile?.Name ?? _lastUploadFileName) ?? "transcription";
+        await Js.InvokeVoidAsync("speechInsight.download", $"{baseName}.txt", "text/plain;charset=utf-8", _transcription);
+    }
+
+    private async Task DownloadJson()
+    {
+        if (_details == null) return;
+        var baseName = GetSafeBaseFileName(_selectedFile?.Name ?? _lastUploadFileName) ?? "transcription";
+        var json = System.Text.Json.JsonSerializer.Serialize(_details, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        await Js.InvokeVoidAsync("speechInsight.download", $"{baseName}.json", "application/json;charset=utf-8", json);
+    }
+
+    private static string? GetSafeBaseFileName(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return null;
+        var name = System.IO.Path.GetFileNameWithoutExtension(fileName);
+        foreach (var c in System.IO.Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return string.IsNullOrWhiteSpace(name) ? "transcription" : name;
+    }
+
+    private sealed record HistoryEntry(string FileName, double? DurationSeconds, int WordCount, string Transcription, AnalyzeDetailsResponseDto Details);
+    private sealed record StatsView(double? DurationSeconds, int WordCount, int CharCount, int SegmentCount, bool Diarized, string Model, string? DetectedLanguage, double? ConfidenceScore);
+    private sealed class StoredHistoryItem
+    {
+        public string FileName { get; set; } = "";
+        public double? DurationSeconds { get; set; }
+        public int WordCount { get; set; }
+        public string Transcription { get; set; } = "";
+        public AnalyzeDetailsResponseDto? Details { get; set; }
+    }
+}

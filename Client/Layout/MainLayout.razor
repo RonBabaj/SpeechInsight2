@@ -1,5 +1,47 @@
 @inherits LayoutComponentBase
+@inject IJSRuntime Js
 
-<div class="main">
-    <main>@Body</main>
+<div class="app-layout">
+    <header class="app-header">
+        <NavLink class="app-logo" href="/" Match="NavLinkMatch.All">SpeechInsight</NavLink>
+        <nav class="app-nav">
+            <NavLink href="/" Match="NavLinkMatch.All">Home</NavLink>
+            <NavLink href="/upload">Upload</NavLink>
+            <button type="button" class="theme-toggle" @onclick="ToggleTheme" title="@(_isDark ? "Switch to light theme" : "Switch to dark theme")">
+                @(_isDark ? "Light" : "Dark")
+            </button>
+        </nav>
+    </header>
+    <main class="app-main">
+        @Body
+    </main>
 </div>
+
+@code {
+    private bool _isDark;
+    private bool _themeReady;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _themeReady) return;
+        try
+        {
+            _isDark = await Js.InvokeAsync<string>("getTheme") == "dark";
+            await InvokeAsync(StateHasChanged);
+        }
+        catch { }
+        _themeReady = true;
+    }
+
+    private async Task ToggleTheme()
+    {
+        try
+        {
+            var next = _isDark ? "light" : "dark";
+            await Js.InvokeVoidAsync("setTheme", next);
+            _isDark = next == "dark";
+        }
+        catch { }
+        StateHasChanged();
+    }
+}

@@ -1,5 +1,6 @@
 // Handles file upload validation, plain and detailed transcription, and returns structured errors (JSON message/detail).
 using Microsoft.AspNetCore.Mvc;
+using SpeechInsight.Api.Models;
 using SpeechInsight.Api.Options;
 using SpeechInsight.Api.Services;
 
@@ -10,28 +11,28 @@ namespace SpeechInsight.Api.Controllers;
 public class AudioController : ControllerBase
 {
     private readonly ITranscriptionService _transcriptionService;
-    private readonly ITranscriptionDetailsService _transcriptionDetailsService;
+    private readonly IAudioAnalysisService _audioAnalysisService;
     private readonly TranscriptionOptions _options;
     private readonly ILogger<AudioController> _logger;
 
     public AudioController(
         ITranscriptionService transcriptionService,
-        ITranscriptionDetailsService transcriptionDetailsService,
+        IAudioAnalysisService audioAnalysisService,
         Microsoft.Extensions.Options.IOptions<TranscriptionOptions> options,
         ILogger<AudioController> logger)
     {
         _transcriptionService = transcriptionService;
-        _transcriptionDetailsService = transcriptionDetailsService;
+        _audioAnalysisService = audioAnalysisService;
         _options = options.Value;
         _logger = logger;
     }
 
     [HttpGet("limits")]
-    public IActionResult GetLimits() => Ok(new
+    public IActionResult GetLimits() => Ok(new AudioLimitsDto
     {
-        maxFileSizeBytes = _options.MaxFileSizeBytes,
-        maxDurationSeconds = _options.MaxDurationSeconds,
-        allowedExtensions = _options.AllowedExtensions
+        MaxFileSizeBytes = _options.MaxFileSizeBytes,
+        MaxDurationSeconds = _options.MaxDurationSeconds,
+        AllowedExtensions = _options.AllowedExtensions
     });
 
     [HttpPost("analyze")]
@@ -66,31 +67,25 @@ public class AudioController : ControllerBase
         var validation = ValidateFile(audioFile);
         if (validation != null) return validation;
 
+        MemoryStream? copy = null;
         try
         {
-            await using var stream = audioFile!.OpenReadStream();
-            var details = await _transcriptionDetailsService.TranscribeDetailedAsync(
-                stream,
+            await using var sourceStream = audioFile!.OpenReadStream();
+            copy = new MemoryStream();
+            await sourceStream.CopyToAsync(copy);
+            copy.Position = 0;
+
+            var response = await _audioAnalysisService.AnalyzeAsync(
+                copy,
                 audioFile.FileName,
                 audioFile.ContentType,
                 diarize);
 
-        var durationExceedsRecommended = details.DurationSeconds.HasValue &&
-                details.DurationSeconds.Value > _options.MaxDurationSeconds;
-
             _logger.LogInformation(
-                "Transcription success: model={Model}, durationSec={Duration}, segments={Segments}, fileSizeBytes={Size}",
-                details.Model, details.DurationSeconds, details.Segments?.Count ?? 0, audioFile.Length);
+                "Analysis success: model={Model}, durationSec={Duration}, words={Words}, language={Lang}",
+                response.Model, response.DurationSeconds, response.WordCount, response.DetectedLanguage);
 
-            return Ok(new
-            {
-                details.Text,
-                details.Model,
-                details.DurationSeconds,
-                details.Segments,
-                details.Diarized,
-                DurationExceedsRecommended = durationExceedsRecommended
-            });
+            return Ok(response);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("OPENAI_API_KEY"))
         {
@@ -103,6 +98,10 @@ public class AudioController : ControllerBase
         catch (HttpRequestException ex)
         {
             return Error(502, "Transcription service error.", ex.Message);
+        }
+        finally
+        {
+            copy?.Dispose();
         }
     }
 
