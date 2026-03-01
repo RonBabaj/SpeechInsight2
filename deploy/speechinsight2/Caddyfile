@@ -1,0 +1,16 @@
+:{$PORT:8080} {
+  encode gzip
+
+  handle_path /api/* {
+    request_body {
+      max_size 50MB
+    }
+    reverse_proxy localhost:5000
+  }
+
+  handle {
+    root * /app/client
+    try_files {path} /index.html
+    file_server
+  }
+}
