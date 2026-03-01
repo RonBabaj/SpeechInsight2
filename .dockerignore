@@ -1,0 +1,24 @@
+# Git and IDE
+.git
+.gitignore
+.cursor
+.vscode
+*.user
+*.suo
+
+# Build and runtime
+**/bin
+**/obj
+**/out
+
+# Docs and local env (do not bake secrets into image)
+README.md
+*.md
+.env
+.env.*
+!.env.example
+
+# Tests and tooling
+**/tests
+**/*Tests
+**/.DS_Store

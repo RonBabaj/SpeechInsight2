@@ -315,6 +315,29 @@ Base URL when running locally: **http://localhost:5200**.
 
 ---
 
+## Docker and Render
+
+The repo includes a **Dockerfile** that builds the Blazor client and the API into a single image. The API serves the client at `/` and exposes `/api/*`. Suitable for deploying as one **Web Service** on [Render](https://render.com).
+
+**Build and run locally:**
+```bash
+docker build -t speechinsight .
+docker run -p 8080:8080 -e PORT=8080 -e OPENAI_API_KEY=your_key speechinsight
+```
+Then open http://localhost:8080.
+
+**On Render:**
+1. New → **Web Service**; connect the repo.
+2. **Build command:** `docker build -t speechinsight .` (or use Render’s native Docker support if available).
+3. **Start command:** `docker run -p $PORT:8080 -e PORT=8080 -e OPENAI_API_KEY=$OPENAI_API_KEY speechinsight`  
+   Or run the image with Render’s **Docker** environment; ensure the app listens on the port Render provides (the app reads the `PORT` env var).
+4. Add **environment variable** `OPENAI_API_KEY` (secret) in the Render dashboard.
+5. Optional: add a `.env` in the repo only for local runs; do **not** rely on `.env` on Render—use Render’s environment variables instead.
+
+The app binds to `0.0.0.0:PORT` so the host can forward traffic. CORS is permissive so the same-origin deployment works; you can restrict origins in `Api/Program.cs` if needed.
+
+---
+
 ## Troubleshooting
 
 - **CORS errors** – Ensure the API is running and allows `http://localhost:5190` (configured in `Api/Program.cs`).

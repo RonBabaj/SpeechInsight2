@@ -7,7 +7,11 @@ var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
 
-builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri("http://localhost:5200") });
+// When served from the API (e.g. Render), same origin; when dev (WASM on :5190), use API origin.
+var apiBase = builder.HostEnvironment.IsDevelopment()
+    ? "http://localhost:5200"
+    : builder.HostEnvironment.BaseAddress;
+builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(apiBase) });
 builder.Services.AddScoped<SpeechInsight.Client.Services.AudioApiClient>();
 
 await builder.Build().RunAsync();
