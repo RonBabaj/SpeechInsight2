@@ -32,8 +32,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 COPY --from=publish-api /out/api .
-COPY --from=publish-client /out/client ./wwwroot
-
+COPY --from=publish-client /out/client/wwwroot ./wwwroot
 # Render sets PORT at runtime. Program.cs reads PORT and binds to 0.0.0.0:PORT.
 EXPOSE 8080
 
