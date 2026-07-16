@@ -24,7 +24,10 @@ SpeechInsight is a **Blazor WebAssembly** + **ASP.NET Core** app for **audio tra
 SpeechInsight2/
 ├── SpeechInsight.sln
 ├── README.md
-├── .gitignore
+├── Dockerfile                    # Production image (API serves Blazor wwwroot)
+├── docker-compose.yml            # VPS Compose stack (project: speechinsight2)
+├── .env.example                  # Template for host .env (OPENAI_API_KEY, etc.)
+├── .github/workflows/deploy.yml  # SSH deploy to /opt/apps/SpeechInsight2
 ├── Api/
 │   ├── Program.cs                    # Host, CORS, DI, DotNetEnv, provider + analysis registration
 │   ├── appsettings.json              # Transcription limits & model names
@@ -315,33 +318,118 @@ Base URL when running locally: **http://localhost:5200**.
 
 ---
 
-## Docker and Render
+## Deployment (Docker Compose + GitHub Actions)
 
-The repo includes a **Dockerfile** that builds the Blazor client and the API into a single image. The API serves the client at `/` and exposes `/api/*`. Suitable for deploying as one **Web Service** on [Render](https://render.com).
+Production runs on an **Ubuntu 24.04 VPS** at `/opt/apps/SpeechInsight2` using **Docker Compose**, with **Nginx Proxy Manager** as the reverse proxy. The single container serves the Blazor client at `/` and the API at `/api/*` on internal port **8080**.
 
-**Build and run locally:**
-```bash
-docker build -t speechinsight .
-docker run -p 8080:8080 -e PORT=8080 -e OPENAI_API_KEY=your_key speechinsight
+### Overview
+
+| Piece | Detail |
+|-------|--------|
+| Path on VPS | `/opt/apps/SpeechInsight2` |
+| Compose project | `speechinsight2` (only this stack is started/stopped) |
+| Container | `speechinsight2` |
+| Internal port | `8080` (map `8080:8080` for NPM → host) |
+| Health endpoint | `GET /api/health` |
+| Secrets on host | `/opt/apps/SpeechInsight2/.env` (gitignored) |
+
+Docker Compose is the **only** deployment mechanism. GitHub Actions SSHes into the VPS and runs Compose there; it does not push images to a registry or touch unrelated containers.
+
+### Required GitHub Secrets
+
+Configure these repository secrets (Settings → Secrets and variables → Actions). **Never** commit private keys or API keys.
+
+| Secret | Purpose |
+|--------|---------|
+| `VPS_HOST` | VPS hostname or IP |
+| `VPS_USER` | SSH username |
+| `VPS_SSH_KEY` | Private SSH key (PEM) for that user |
+
+Also ensure the VPS has a gitignored `.env` (see `.env.example`):
+
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+ASPNETCORE_ENVIRONMENT=Production
+PORT=8080
 ```
-Then open http://localhost:8080.
 
-**On Render:**
-1. New → **Web Service**; connect the repo.
-2. **Build command:** `docker build -t speechinsight .` (or use Render’s native Docker support if available).
-3. **Start command:** `docker run -p $PORT:8080 -e PORT=8080 -e OPENAI_API_KEY=$OPENAI_API_KEY speechinsight`  
-   Or run the image with Render’s **Docker** environment; ensure the app listens on the port Render provides (the app reads the `PORT` env var).
-4. Add **environment variable** `OPENAI_API_KEY` (secret) in the Render dashboard.
-5. Optional: add a `.env` in the repo only for local runs; do **not** rely on `.env` on Render—use Render’s environment variables instead.
+### GitHub Actions workflow
 
-The app binds to `0.0.0.0:PORT` so the host can forward traffic. CORS is permissive so the same-origin deployment works; you can restrict origins in `Api/Program.cs` if needed.
+File: `.github/workflows/deploy.yml`
+
+**Triggers:** push to `main`, or manual `workflow_dispatch`.
+
+**What it runs on the VPS** (fails immediately on any error):
+
+```bash
+cd /opt/apps/SpeechInsight2
+git fetch origin
+git reset --hard origin/main
+docker compose down
+docker compose build --pull
+docker compose up -d
+docker image prune -f
+# then: docker compose ps + curl http://127.0.0.1:8080/api/health until healthy
+```
+
+`git reset --hard` only updates tracked files; your host `.env` stays intact because it is gitignored/untracked.
+
+### Manual deployment
+
+On the VPS:
+
+```bash
+cd /opt/apps/SpeechInsight2
+# first time only: cp .env.example .env && edit OPENAI_API_KEY
+git fetch origin
+git reset --hard origin/main
+docker compose down
+docker compose build --pull
+docker compose up -d
+docker compose ps
+curl -fsS http://127.0.0.1:8080/api/health
+```
+
+Point Nginx Proxy Manager at the host port **8080** (or the Docker network alias if you attach NPM to the same network).
+
+**Local smoke test** (from repo root):
+
+```bash
+cp .env.example .env   # set OPENAI_API_KEY
+docker compose build
+docker compose up -d
+curl -fsS http://127.0.0.1:8080/api/health
+```
+
+### Rollback
+
+```bash
+cd /opt/apps/SpeechInsight2
+git fetch origin
+git log --oneline -20          # pick a known-good commit
+git reset --hard <commit-sha>
+docker compose down
+docker compose build --pull
+docker compose up -d
+curl -fsS http://127.0.0.1:8080/api/health
+```
+
+To return to latest `main` afterward: `git reset --hard origin/main` and redeploy as above.
+
+### Deployment troubleshooting
+
+- **Workflow SSH failures** – Confirm `VPS_HOST`, `VPS_USER`, and `VPS_SSH_KEY`; ensure the public key is in `~/.ssh/authorized_keys` and the user can access `/opt/apps/SpeechInsight2`.
+- **Container unhealthy / curl fails** – `docker compose logs --tail=100`; confirm port 8080 is free and `.env` contains `OPENAI_API_KEY`.
+- **Compose cannot find `.env`** – Create `/opt/apps/SpeechInsight2/.env` from `.env.example` before the first deploy.
+- **NPM 502** – Proxy must target the host/container port where Compose publishes `8080`; restart only the `speechinsight2` stack (`docker compose` in this directory), not other Compose projects.
+- **Stale image** – Redeploy runs `docker compose build --pull` and `docker image prune -f` (dangling images only; other apps’ tagged images are left alone).
 
 ---
 
 ## Troubleshooting
 
 - **CORS errors** – Ensure the API is running and allows `http://localhost:5190` (configured in `Api/Program.cs`).
-- **500 / “OPENAI_API_KEY”** – Create `Api/.env` with `OPENAI_API_KEY=...` and run the API from the **Api** folder so `DotNetEnv.Env.Load()` finds the file.
+- **500 / “OPENAI_API_KEY”** – Create `Api/.env` with `OPENAI_API_KEY=...` and run the API from the **Api** folder so `DotNetEnv.Env.Load()` finds the file. For Docker, set `OPENAI_API_KEY` in the host `.env` used by Compose.
 - **429 / quota** – Your OpenAI account has no quota or rate limit; check plan and billing.
 - **Empty or wrong transcription** – Use an allowed format (e.g. mp3, wav, m4a, webm) and stay under the max file size. For long files, the UI may show a “longer than recommended” warning; you can still use the result.
 - **Microphone not working** – Grant microphone permission when prompted. Recording produces WebM; the same analyze/details endpoint is used as for file uploads.

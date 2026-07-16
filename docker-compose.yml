@@ -1,22 +1,22 @@
-# Optional local/alternate compose for the deploy/speechinsight2 tree.
-# Production uses the repo-root docker-compose.yml at /opt/apps/SpeechInsight2.
+# SpeechInsight2 — production Docker Compose (VPS + Nginx Proxy Manager)
+# Deploy from repo root: /opt/apps/SpeechInsight2
 #
-# From repo root:
-#   docker compose -f deploy/speechinsight2/docker-compose.yml up --build
+# Required on the host (gitignored): .env with at least OPENAI_API_KEY=...
+# Optional overrides: ASPNETCORE_ENVIRONMENT, PORT
 
-name: speechinsight2-deploy-alt
+name: speechinsight2
 
 services:
   app:
     build:
-      context: ../..
+      context: .
       dockerfile: Dockerfile
     image: speechinsight2:latest
     container_name: speechinsight2
     ports:
       - "8080:8080"
     env_file:
-      - ../../.env
+      - .env
     environment:
       PORT: "8080"
       ASPNETCORE_ENVIRONMENT: Production

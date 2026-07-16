@@ -1,15 +1,16 @@
-:{$PORT:8080} {
+:{$SITE_PORT:8080} {
   encode gzip
 
-  handle_path /api/* {
+  # Keep the /api prefix when proxying (controllers are routed under /api).
+  handle /api/* {
     request_body {
       max_size 50MB
     }
-    reverse_proxy localhost:5000
+    reverse_proxy 127.0.0.1:5000
   }
 
   handle {
-    root * /app/client
+    root * /app/client/wwwroot
     try_files {path} /index.html
     file_server
   }

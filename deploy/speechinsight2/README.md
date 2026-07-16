@@ -1,31 +1,31 @@
-# SpeechInsight2 – Deploy to Render
+# SpeechInsight2 deploy helpers (legacy Render-oriented layout).
+#
+# Production deployment uses the **repo-root** files:
+#   - Dockerfile
+#   - docker-compose.yml
+#   - .github/workflows/deploy.yml
+# on the VPS at /opt/apps/SpeechInsight2 behind Nginx Proxy Manager.
+#
+# This folder keeps optional helpers (Caddy-based image variant). Prefer the
+# root Compose stack for VPS deploys.
 
-This folder contains the Docker and CI/CD setup for deploying Api + Client as one service.
+## Production (recommended)
 
-## Local test
+From `/opt/apps/SpeechInsight2` (repo root):
 
-From repo root:
+```bash
+# Ensure .env exists (see repo-root .env.example)
+docker compose build --pull
+docker compose up -d
+curl -fsS http://127.0.0.1:8080/api/health
+```
+
+## Alternate image (Caddy + API)
+
+Build from repo root:
 
 ```bash
 docker build -f deploy/speechinsight2/Dockerfile .
-docker run -p 8080:8080 <image-id>
 ```
 
-Or: `docker compose -f deploy/speechinsight2/docker-compose.yml up --build`
-
-Then open http://localhost:8080 (UI) and http://localhost:8080/api/... (API).
-
-## Render setup
-
-1. Create a **Web Service**; connect this GitHub repo.
-2. Build: Docker; Dockerfile path `deploy/speechinsight2/Dockerfile`.
-3. Add env vars in the dashboard (e.g. `ASPNETCORE_ENVIRONMENT=Production`, any API keys).
-4. Deploy. Render will set `PORT`; the container listens on it.
-
-## GitHub Actions (optional)
-
-Copy `.github/workflows/deploy.yml` from this folder to the repo root as `.github/workflows/deploy.yml`. Add secrets: `RENDER_API_KEY`, `RENDER_SERVICE_ID`. Pushes to `main` will then build and trigger a Render deploy.
-
-## Safety
-
-- Caddy limits request body to 50 MB for `/api/*`. Also set `Kestrel.Limits.MaxRequestBodySize` in the Api if you want the API to reject oversized requests.
+See the root README for GitHub Actions secrets, rollback, and troubleshooting.
