@@ -1,41 +1,71 @@
-name: Build and Deploy to Render
+name: Deploy to VPS
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-speechinsight2-production
+  cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
+  deploy:
+    name: Deploy SpeechInsight2
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        uses: docker/build-push-action@v6
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
         with:
-          context: .
-          file: deploy/speechinsight2/Dockerfile
-          push: false
-          load: true
-          tags: speechinsight2:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          command_timeout: 25m
+          script: |
+            set -euo pipefail
 
-      - name: Trigger Render deploy
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-        run: |
-          if [ -z "$RENDER_API_KEY" ] || [ -z "$RENDER_SERVICE_ID" ]; then
-            echo "RENDER_API_KEY or RENDER_SERVICE_ID not set; skipping deploy trigger."
-            exit 0
-          fi
-          curl -s -X POST "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys" \
-            -H "Authorization: Bearer ${RENDER_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d '{"clearCache": "do_not_clear"}' \
-            | cat
+            cd /opt/apps/SpeechInsight2
+
+            git fetch origin
+            git reset --hard origin/main
+
+            docker compose down
+            docker compose build --pull
+            docker compose up -d
+
+            docker image prune -f
+
+            echo "Waiting for containers..."
+            docker compose ps
+
+            echo "Verifying health endpoint..."
+            healthy=0
+            for i in $(seq 1 30); do
+              if curl -fsS "http://127.0.0.1:8080/api/health" >/dev/null; then
+                echo "Health check passed on attempt ${i}"
+                healthy=1
+                break
+              fi
+              echo "Attempt ${i}/30: not healthy yet, retrying in 2s..."
+              sleep 2
+            done
+
+            if [ "${healthy}" -ne 1 ]; then
+              echo "ERROR: /api/health did not become healthy in time"
+              docker compose ps
+              docker compose logs --tail=100 || true
+              exit 1
+            fi
+
+            running="$(docker compose ps --status running --format '{{.Name}}')"
+            if ! printf '%s\n' "${running}" | grep -qx 'speechinsight2'; then
+              echo "ERROR: required container speechinsight2 is not running"
+              docker compose ps
+              exit 1
+            fi
+
+            echo "Deployment verified successfully."
+            docker compose ps

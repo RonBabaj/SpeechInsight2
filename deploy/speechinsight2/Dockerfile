@@ -1,4 +1,5 @@
-# SpeechInsight2: Api + Client in one image for Render.
+# SpeechInsight2 alternate image: Api + Client with Caddy in-process.
+# Prefer the repo-root Dockerfile + docker-compose.yml for VPS production.
 # Build from repo root: docker build -f deploy/speechinsight2/Dockerfile .
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS api-build
@@ -18,10 +19,10 @@ RUN dotnet publish "Client/SpeechInsight.Client.csproj" -c Release -o /app/clien
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
-  && wget -q -O /usr/local/bin/caddy "https://github.com/caddyserver/caddy/releases/download/v2.7.6/caddy_2.7.6_linux_amd64" \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+  && curl -fsSL -o /usr/local/bin/caddy "https://github.com/caddyserver/caddy/releases/download/v2.7.6/caddy_2.7.6_linux_amd64" \
   && chmod +x /usr/local/bin/caddy \
-  && apt-get remove -y wget && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=api-build /app/api /app/api
 COPY --from=client-build /app/client /app/client

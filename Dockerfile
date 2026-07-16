@@ -1,5 +1,5 @@
-# SpeechInsight: Blazor WASM client + ASP.NET Core API in a single container for Render.
-# The API serves the client from / and exposes /api/*. Set OPENAI_API_KEY and PORT (Render sets PORT).
+# SpeechInsight: Blazor WASM client + ASP.NET Core API in a single container.
+# The API serves the client from / and exposes /api/*. Set OPENAI_API_KEY and PORT.
 
 # -----------------------------------------------------------------------------
 # Stage 1: Publish Blazor WASM client
@@ -31,9 +31,14 @@ RUN dotnet publish Api/SpeechInsight.Api.csproj -c Release -o /out/api
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
+# curl is used by Docker Compose healthchecks (see docker-compose.yml).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY --from=publish-api /out/api .
 COPY --from=publish-client /out/client/wwwroot ./wwwroot
-# Render sets PORT at runtime. Program.cs reads PORT and binds to 0.0.0.0:PORT.
+# Hosts (VPS / NPM) set PORT at runtime. Program.cs binds to 0.0.0.0:PORT.
 EXPOSE 8080
 
 ENTRYPOINT ["dotnet", "SpeechInsight.Api.dll"]
