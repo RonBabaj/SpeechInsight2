@@ -3,21 +3,23 @@ using System.Diagnostics;
 namespace SpeechInsight.Api.Services;
 
 /// <summary>
-/// Uses ffmpeg to transcode browser MediaRecorder output (webm/mp4/ogg/wav)
-/// into MP3 that gpt-4o-transcribe-diarize accepts reliably.
+/// Uses ffmpeg to convert MediaRecorder output into mono PCM WAV.
+/// Official OpenAI diarize examples use WAV; PCM is the safest container for gpt-4o-transcribe-diarize.
+/// Supported input containers match the API list: mp3, mp4, mpeg, mpga, m4a, wav, webm (+ ogg).
 /// </summary>
 public sealed class AudioTranscodeService : IAudioTranscodeService
 {
+    // OpenAI docs: mp3, mp4, mpeg, mpga, m4a, wav, webm (+ ogg/flac in API ref).
     private static readonly HashSet<string> AllowedInputExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".webm", ".wav", ".mp4", ".m4a", ".ogg", ".oga", ".mp3", ".mpeg", ".mpga"
+        ".webm", ".wav", ".mp4", ".m4a", ".ogg", ".oga", ".mp3", ".mpeg", ".mpga", ".flac"
     };
 
     private readonly ILogger<AudioTranscodeService> _logger;
 
     public AudioTranscodeService(ILogger<AudioTranscodeService> logger) => _logger = logger;
 
-    public async Task<byte[]?> TryConvertToMp3Async(
+    public async Task<byte[]?> TryConvertToWavAsync(
         byte[] audioBytes,
         string inputExtension,
         CancellationToken cancellationToken = default)
@@ -32,24 +34,23 @@ public sealed class AudioTranscodeService : IAudioTranscodeService
             return null;
         }
 
-        // Already MP3 — still re-encode to a known-good profile for the diarize model.
         var tempDir = Path.Combine(Path.GetTempPath(), "speechinsight-transcode");
         Directory.CreateDirectory(tempDir);
         var id = Guid.NewGuid().ToString("N");
         var inputPath = Path.Combine(tempDir, $"{id}{ext}");
-        var mp3Path = Path.Combine(tempDir, $"{id}.mp3");
+        var wavPath = Path.Combine(tempDir, $"{id}.wav");
 
         try
         {
             await File.WriteAllBytesAsync(inputPath, audioBytes, cancellationToken);
 
+            // Official diarize examples use WAV. Force PCM s16le mono 24 kHz (no codec plugins required).
             var psi = new ProcessStartInfo
             {
                 FileName = "ffmpeg",
-                // Force a clean mono 24 kHz CBR MP3 — format used in working diarize examples.
                 Arguments =
                     $"-hide_banner -loglevel error -y -i \"{inputPath}\" " +
-                    $"-vn -ac 1 -ar 24000 -codec:a libmp3lame -b:a 64k \"{mp3Path}\"",
+                    $"-vn -ac 1 -ar 24000 -c:a pcm_s16le -f wav \"{wavPath}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -69,41 +70,46 @@ public sealed class AudioTranscodeService : IAudioTranscodeService
             var stderr = await stderrTask;
             _ = await stdoutTask;
 
-            if (process.ExitCode != 0 || !File.Exists(mp3Path))
+            if (process.ExitCode != 0 || !File.Exists(wavPath))
             {
                 _logger.LogWarning(
-                    "ffmpeg {Ext}→MP3 failed (exit {Code}): {Error}",
+                    "ffmpeg {Ext}→WAV failed (exit {Code}): {Error}",
                     ext,
                     process.ExitCode,
                     stderr.Trim());
                 return null;
             }
 
-            var mp3 = await File.ReadAllBytesAsync(mp3Path, cancellationToken);
-            if (mp3.Length == 0)
+            var wav = await File.ReadAllBytesAsync(wavPath, cancellationToken);
+            if (!IsPcmWav(wav))
             {
-                _logger.LogWarning("ffmpeg produced empty MP3 from {Ext}.", ext);
+                _logger.LogWarning("ffmpeg produced non-WAV or empty output from {Ext} ({Bytes} bytes).", ext, wav.Length);
                 return null;
             }
 
             _logger.LogInformation(
-                "Transcoded {Ext} ({InBytes} bytes) → MP3 ({OutBytes} bytes).",
+                "Transcoded {Ext} ({InBytes} bytes) → PCM WAV ({OutBytes} bytes) for diarize.",
                 ext,
                 audioBytes.Length,
-                mp3.Length);
-            return mp3;
+                wav.Length);
+            return wav;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Audio→MP3 transcode failed for {Ext}.", ext);
+            _logger.LogWarning(ex, "Audio→WAV transcode failed for {Ext}.", ext);
             return null;
         }
         finally
         {
             TryDelete(inputPath);
-            TryDelete(mp3Path);
+            TryDelete(wavPath);
         }
     }
+
+    internal static bool IsPcmWav(byte[] bytes) =>
+        bytes.Length >= 44
+        && bytes[0] == (byte)'R' && bytes[1] == (byte)'I' && bytes[2] == (byte)'F' && bytes[3] == (byte)'F'
+        && bytes[8] == (byte)'W' && bytes[9] == (byte)'A' && bytes[10] == (byte)'V' && bytes[11] == (byte)'E';
 
     private static string? NormalizeExtension(string? inputExtension)
     {
