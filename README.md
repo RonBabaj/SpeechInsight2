@@ -419,7 +419,12 @@ To return to latest `main` afterward: `git reset --hard origin/main` and redeplo
 ### Deployment troubleshooting
 
 - **Workflow SSH failures** – Confirm `VPS_HOST`, `VPS_USER`, and `VPS_SSH_KEY`; ensure the public key is in `~/.ssh/authorized_keys` and the user can access `/opt/apps/SpeechInsight2`.
-- **`detected dubious ownership`** – The deploy user does not own the repo directory (common if it was cloned as root). The workflow marks `/opt/apps/SpeechInsight2` as a Git safe directory. To fix permanently on the VPS: `sudo chown -R "$USER:$USER" /opt/apps/SpeechInsight2`.
+- **`detected dubious ownership` / `cannot open '.git/FETCH_HEAD': Permission denied`** – The SSH deploy user cannot write the repo (often cloned as `root`). On the VPS, run as a sudoer, replacing `DEPLOY_USER` with the same value as `VPS_USER`:
+  ```bash
+  sudo chown -R DEPLOY_USER:DEPLOY_USER /opt/apps/SpeechInsight2
+  ls -ld /opt/apps/SpeechInsight2 /opt/apps/SpeechInsight2/.git
+  ```
+  Then re-run the workflow. `safe.directory` alone does not fix write permission errors.
 - **Container unhealthy / curl fails** – `docker compose logs --tail=100`; confirm port 8080 is free and `.env` contains `OPENAI_API_KEY`.
 - **Compose cannot find `.env`** – Create `/opt/apps/SpeechInsight2/.env` from `.env.example` before the first deploy.
 - **NPM 502** – Proxy must target the host/container port where Compose publishes `8080`; restart only the `speechinsight2` stack (`docker compose` in this directory), not other Compose projects.

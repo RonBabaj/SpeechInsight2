@@ -27,10 +27,23 @@ jobs:
           script: |
             set -euo pipefail
 
-            # Repo may be owned by another user (e.g. root); allow this deploy user to run git.
-            git config --global --add safe.directory /opt/apps/SpeechInsight2
+            APP_DIR=/opt/apps/SpeechInsight2
 
-            cd /opt/apps/SpeechInsight2
+            # Repo may be owned by another user (e.g. root); allow this deploy user to run git.
+            git config --global --add safe.directory "${APP_DIR}"
+
+            cd "${APP_DIR}"
+
+            echo "Deploy user: $(whoami) uid=$(id -u) gid=$(id -g)"
+            echo "Directory ownership:"
+            ls -ld "${APP_DIR}" "${APP_DIR}/.git" || true
+
+            if [ ! -w "${APP_DIR}/.git" ]; then
+              echo "ERROR: $(whoami) cannot write to ${APP_DIR}/.git"
+              echo "On the VPS, run (as a sudoer):"
+              echo "  sudo chown -R $(whoami):$(whoami) ${APP_DIR}"
+              exit 1
+            fi
 
             git fetch origin
             git reset --hard origin/main
