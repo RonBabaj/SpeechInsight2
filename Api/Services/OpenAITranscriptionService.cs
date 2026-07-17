@@ -40,15 +40,18 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
     private const string WhisperEndpoint = "https://api.openai.com/v1/audio/transcriptions";
     private readonly HttpClient _httpClient;
     private readonly Api.Options.TranscriptionOptions _options;
+    private readonly IAudioTranscodeService _transcodeService;
     private readonly ILogger<OpenAITranscriptionService> _logger;
 
     public OpenAITranscriptionService(
         IHttpClientFactory httpClientFactory,
         Microsoft.Extensions.Options.IOptions<Api.Options.TranscriptionOptions> options,
+        IAudioTranscodeService transcodeService,
         ILogger<OpenAITranscriptionService> logger)
     {
         _httpClient = httpClientFactory.CreateClient();
         _options = options.Value;
+        _transcodeService = transcodeService;
         _logger = logger;
     }
 
@@ -74,10 +77,29 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
     public async Task<TranscriptionDetails> TranscribeDetailedAsync(Stream audioStream, string fileName, string? contentType, bool diarize)
     {
         var bytes = await ReadAllBytesAsync(audioStream);
+        var isMicRecording = IsMicrophoneRecording(fileName);
         var (resolvedName, resolvedType) = ResolveAudioIdentity(bytes, fileName, contentType);
 
+        // gpt-4o-transcribe-diarize often rejects browser PCM WAV; MP3 transcode is more reliable.
+        if (diarize && isMicRecording && IsRiffWav(bytes))
+        {
+            var mp3 = await _transcodeService.TryConvertWavToMp3Async(bytes);
+            if (mp3 is { Length: > 0 })
+            {
+                bytes = mp3;
+                resolvedName = "recording.mp3";
+                resolvedType = "audio/mpeg";
+                _logger.LogInformation("Mic recording transcoded to MP3 ({Bytes} bytes) for diarization.", bytes.Length);
+            }
+            else
+            {
+                _logger.LogWarning("Mic WAV→MP3 transcode unavailable; diarize may fail (ffmpeg missing?).");
+            }
+        }
+
         _logger.LogInformation(
-            "OpenAI upload identity: requested={RequestedName}/{RequestedType}, resolved={ResolvedName}/{ResolvedType}, bytes={Bytes}, magic={Magic}",
+            "OpenAI upload identity: mic={IsMic}, requested={RequestedName}/{RequestedType}, resolved={ResolvedName}/{ResolvedType}, bytes={Bytes}, magic={Magic}",
+            isMicRecording,
             fileName,
             contentType,
             resolvedName,
@@ -85,47 +107,66 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             bytes.Length,
             DescribeMagic(bytes));
 
-        var model = diarize ? _options.DiarizeModel : _options.DefaultModel;
-        var responseFormat = diarize ? "diarized_json" : "verbose_json";
-        var chunkingStrategy = diarize ? "auto" : null;
+        if (!diarize)
+        {
+            var (basicStatus, basicBody) = await CallOpenAIAsync(
+                bytes,
+                resolvedName,
+                resolvedType,
+                _options.DefaultModel,
+                "verbose_json",
+                chunkingStrategy: null);
+
+            if (basicStatus is < 200 or >= 300)
+                throw new OpenAITranscriptionException((HttpStatusCode)basicStatus, basicBody);
+
+            return ParseTranscriptionDetails(basicBody, _options.DefaultModel, diarize: false);
+        }
 
         var (status, body) = await CallOpenAIAsync(
             bytes,
             resolvedName,
             resolvedType,
-            model,
-            responseFormat,
-            chunkingStrategy);
+            _options.DiarizeModel,
+            "diarized_json",
+            chunkingStrategy: "auto");
 
-        // gpt-4o models are strict about containers; if diarize fails as "unsupported", fall back to whisper-1
-        // so microphone recordings still produce a transcript (without speaker labels).
-        if (status is >= 400 and < 500 && diarize && LooksLikeUnsupportedAudio(body))
+        if (status is >= 200 and < 300)
+            return ParseTranscriptionDetails(body, _options.DiarizeModel, diarize: true);
+
+        _logger.LogWarning(
+            "Diarize model failed (status={Status}, mic={IsMic}). Body={Body}",
+            status,
+            isMicRecording,
+            Truncate(body, 500));
+
+        // Mic recordings: always fall back to whisper-1 so "With speakers" still returns a transcript.
+        if (isMicRecording || LooksLikeUnsupportedAudio(body))
         {
-            _logger.LogWarning(
-                "Diarize model rejected audio ({ResolvedName}, {Bytes} bytes). Retrying with {FallbackModel}.",
-                resolvedName,
-                bytes.Length,
-                _options.DefaultModel);
-
-            (status, body) = await CallOpenAIAsync(
+            var (fallbackStatus, fallbackBody) = await CallOpenAIAsync(
                 bytes,
                 resolvedName,
                 resolvedType,
-                model: _options.DefaultModel,
-                responseFormat: "verbose_json",
+                _options.DefaultModel,
+                "verbose_json",
                 chunkingStrategy: null);
 
-            if (status is >= 200 and < 300)
+            if (fallbackStatus is >= 200 and < 300)
             {
-                var fallback = ParseTranscriptionDetails(body, _options.DefaultModel, diarize: false);
-                return fallback;
+                _logger.LogInformation(
+                    "Diarize unavailable; returned {Model} transcript without speaker labels.",
+                    _options.DefaultModel);
+                return ParseTranscriptionDetails(fallbackBody, _options.DefaultModel, diarize: false);
             }
+
+            _logger.LogWarning(
+                "Whisper fallback also failed (status={Status}): {Body}",
+                fallbackStatus,
+                Truncate(fallbackBody, 500));
+            throw new OpenAITranscriptionException((HttpStatusCode)fallbackStatus, fallbackBody);
         }
 
-        if (status is < 200 or >= 300)
-            throw new OpenAITranscriptionException((HttpStatusCode)status, body);
-
-        return ParseTranscriptionDetails(body, model, diarize);
+        throw new OpenAITranscriptionException((HttpStatusCode)status, body);
     }
 
     private static TranscriptionDetails ParseTranscriptionDetails(string body, string model, bool diarize)
@@ -219,10 +260,8 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
         using var content = new MultipartFormDataContent();
 
-        // Match curl -F file=@audio.wav: bytes + filename extension OpenAI uses to detect format.
-        // ByteArrayContent avoids StreamContent length/position quirks.
+        // OpenAI infers format from filename extension; omit Content-Type on the file part.
         var fileContent = new ByteArrayContent(audioBytes);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Add(fileContent, "file", fileName);
 
         // Plain UTF-8 fields without charset=utf-8 (closer to curl -F model=...).
@@ -373,6 +412,15 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         var n = Math.Min(bytes.Length, 8);
         return Convert.ToHexString(bytes.AsSpan(0, n));
     }
+
+    private static bool IsMicrophoneRecording(string? fileName) =>
+        !string.IsNullOrWhiteSpace(fileName)
+        && fileName.StartsWith("recording.", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsRiffWav(byte[] bytes) =>
+        bytes.Length >= 12
+        && bytes[0] == (byte)'R' && bytes[1] == (byte)'I' && bytes[2] == (byte)'F' && bytes[3] == (byte)'F'
+        && bytes[8] == (byte)'W' && bytes[9] == (byte)'A' && bytes[10] == (byte)'V' && bytes[11] == (byte)'E';
 
     private static bool LooksLikeUnsupportedAudio(string responseBody)
     {

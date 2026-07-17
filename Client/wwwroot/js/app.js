@@ -68,7 +68,7 @@ window.speechInsight = {
       return out;
     },
 
-    _encodeWavBase64: function (floatSamples, sampleRate) {
+    _encodeWavBytes: function (floatSamples, sampleRate) {
       const pcm = this._floatTo16BitPcm(floatSamples);
       const numChannels = 1;
       const bytesPerSample = 2;
@@ -100,13 +100,8 @@ window.speechInsight = {
         view.setInt16(offset, pcm[i], true);
       }
 
-      const bytes = new Uint8Array(buffer);
-      let binary = "";
-      const chunk = 0x8000;
-      for (let i = 0; i < bytes.length; i += chunk) {
-        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
-      }
-      return btoa(binary);
+      // Return raw bytes to Blazor (maps to byte[]) — avoids base64 corruption.
+      return new Uint8Array(buffer);
     },
 
     _cleanup: function () {
@@ -195,7 +190,7 @@ window.speechInsight = {
           self._cleanup();
 
           if (!chunks.length) {
-            resolve("");
+            resolve(null);
             return;
           }
 
@@ -213,15 +208,15 @@ window.speechInsight = {
           const targetRate = 24000;
           const resampled = self._resample(merged, inputRate, targetRate);
           if (!resampled.length) {
-            resolve("");
+            resolve(null);
             return;
           }
 
-          resolve(self._encodeWavBase64(resampled, targetRate));
+          resolve(self._encodeWavBytes(resampled, targetRate));
         } catch (err) {
           console.error("SpeechInsight: failed to finalize recording", err);
           self._cleanup();
-          resolve("");
+          resolve(null);
         }
       });
     }

@@ -222,8 +222,8 @@
     {
         try
         {
-            var base64 = await Js.InvokeAsync<string>("speechInsight.recording.stop");
-            _recordedAudioBytes = string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
+            var bytes = await Js.InvokeAsync<byte[]?>("speechInsight.recording.stop");
+            _recordedAudioBytes = (bytes?.Length ?? 0) > 0 ? bytes : null;
             _recordedContentType = "audio/wav";
             _recordedFileName = "recording.wav";
 
@@ -341,6 +341,9 @@
             _transcriptBlocks = GetTranscriptBlocks();
             _stats = BuildStats(details);
             _durationExceedsRecommended = details.DurationExceedsRecommended;
+
+            if (_modelChoice == "diarize" && !details.Diarized)
+                _actionHint = "Speaker separation was not available for this microphone recording; showing a standard transcript instead.";
 
             _lastUploadFileName = fileName;
             _history.Insert(0, new HistoryEntry(fileName, details.DurationSeconds, _stats.WordCount, _transcription, details, details.Summary, details.Sentiment?.Label, DateTime.UtcNow));
