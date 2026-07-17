@@ -45,12 +45,30 @@ public sealed class AudioApiClient
         bool diarize,
         CancellationToken ct = default)
     {
+        // Prefer ByteArrayContent: Blazor WASM multipart + StreamContent can mis-send audio payloads.
+        byte[] bytes;
+        if (audioContent.CanSeek)
+        {
+            var originalPos = audioContent.Position;
+            audioContent.Position = 0;
+            using var copy = new MemoryStream();
+            await audioContent.CopyToAsync(copy, ct);
+            bytes = copy.ToArray();
+            audioContent.Position = originalPos;
+        }
+        else
+        {
+            using var copy = new MemoryStream();
+            await audioContent.CopyToAsync(copy, ct);
+            bytes = copy.ToArray();
+        }
+
         using var form = new MultipartFormDataContent();
-        var streamContent = new StreamContent(audioContent);
+        var fileContent = new ByteArrayContent(bytes);
         var mediaType = NormalizeMediaType(contentType);
         if (mediaType != null)
-            streamContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
-        form.Add(streamContent, "audioFile", fileName);
+            fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
+        form.Add(fileContent, "audioFile", fileName);
 
         var url = $"api/audio/analyze/details?diarize={diarize.ToString().ToLowerInvariant()}";
         var response = await _http.PostAsync(url, form, ct);

@@ -46,7 +46,23 @@ var app = builder.Build();
 app.UseCors();
 app.UseBlazorFrameworkFiles();
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        // Prevent stale Blazor/JS after deploys (old JS + new DLL can mislabel mic audio).
+        var path = ctx.Context.Request.Path.Value ?? "";
+        if (path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+            path.Equals("/", StringComparison.Ordinal) ||
+            path.EndsWith("/js/app.js", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith("blazor.boot.json", StringComparison.OrdinalIgnoreCase))
+        {
+            ctx.Context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+            ctx.Context.Response.Headers.Pragma = "no-cache";
+            ctx.Context.Response.Headers.Expires = "0";
+        }
+    }
+});
 app.MapControllers();
 // SPA fallback: serve Blazor client for non-API routes (when client is served from this host).
 app.MapFallbackToFile("index.html");
