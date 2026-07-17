@@ -28,6 +28,7 @@ else
 }
 
 builder.Services.AddScoped<IAudioDurationService, AudioDurationService>();
+builder.Services.AddScoped<IAudioTranscodeService, AudioTranscodeService>();
 builder.Services.AddScoped<ITextInsightsService, OpenAITextInsightsService>();
 builder.Services.AddScoped<IAudioAnalysisService, AudioAnalysisService>();
 
