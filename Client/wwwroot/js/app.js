@@ -31,62 +31,49 @@ window.speechInsight = {
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   },
-  // Microphone recording: getUserMedia + MediaRecorder, converted to WAV for OpenAI compatibility.
-  // gpt-4o-transcribe / diarize models often reject raw MediaRecorder WebM as "corrupted or unsupported".
+  // Microphone recording: capture PCM via Web Audio API and encode 16 kHz mono 16-bit WAV.
+  // Avoids MediaRecorder WebM/MP4, which gpt-4o-transcribe-diarize often rejects.
   recording: {
     _stream: null,
-    _recorder: null,
-    _chunks: [],
-    _mimeType: "",
-    _resolveStop: null,
+    _audioCtx: null,
+    _source: null,
+    _processor: null,
+    _mute: null,
+    _pcmChunks: [],
+    _inputSampleRate: 48000,
+    _recording: false,
 
-    _pickMimeType: function () {
-      if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== "function") return "";
-      const candidates = [
-        "audio/webm;codecs=opus",
-        "audio/webm",
-        "audio/mp4",
-        "audio/ogg;codecs=opus",
-        "audio/ogg"
-      ];
-      for (let i = 0; i < candidates.length; i++) {
-        if (MediaRecorder.isTypeSupported(candidates[i])) return candidates[i];
+    _floatTo16BitPcm: function (input) {
+      const out = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
-      return "";
+      return out;
     },
 
-    _blobToBase64: function (blob) {
-      return new Promise(function (resolve, reject) {
-        const reader = new FileReader();
-        reader.onloadend = function () {
-          const dataUrl = reader.result;
-          const base64 = (dataUrl && typeof dataUrl === "string" && dataUrl.indexOf(",") >= 0)
-            ? dataUrl.split(",")[1]
-            : "";
-          resolve(base64);
-        };
-        reader.onerror = function () { reject(reader.error || new Error("Failed to read recording.")); };
-        reader.readAsDataURL(blob);
-      });
+    // Linear resample Float32 mono PCM to target rate.
+    _resample: function (input, fromRate, toRate) {
+      if (fromRate === toRate) return input;
+      const ratio = fromRate / toRate;
+      const newLen = Math.max(1, Math.round(input.length / ratio));
+      const out = new Float32Array(newLen);
+      for (let i = 0; i < newLen; i++) {
+        const srcIndex = i * ratio;
+        const i0 = Math.floor(srcIndex);
+        const i1 = Math.min(i0 + 1, input.length - 1);
+        const frac = srcIndex - i0;
+        out[i] = input[i0] * (1 - frac) + input[i1] * frac;
+      }
+      return out;
     },
 
-    // Encode an AudioBuffer as 16-bit PCM mono WAV (widely accepted by OpenAI transcription models).
-    _audioBufferToWavBlob: function (audioBuffer) {
+    _encodeWavBase64: function (floatSamples, sampleRate) {
+      const pcm = this._floatTo16BitPcm(floatSamples);
       const numChannels = 1;
-      const sampleRate = audioBuffer.sampleRate;
-      const length = audioBuffer.length;
-      const channelCount = audioBuffer.numberOfChannels;
-      const samples = new Float32Array(length);
-
-      // Mix down to mono.
-      for (let ch = 0; ch < channelCount; ch++) {
-        const data = audioBuffer.getChannelData(ch);
-        for (let i = 0; i < length; i++) samples[i] += data[i] / channelCount;
-      }
-
       const bytesPerSample = 2;
       const blockAlign = numChannels * bytesPerSample;
-      const dataSize = length * blockAlign;
+      const dataSize = pcm.length * bytesPerSample;
       const buffer = new ArrayBuffer(44 + dataSize);
       const view = new DataView(buffer);
 
@@ -109,86 +96,131 @@ window.speechInsight = {
       view.setUint32(40, dataSize, true);
 
       let offset = 44;
-      for (let i = 0; i < length; i++) {
-        const s = Math.max(-1, Math.min(1, samples[i]));
-        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-        offset += 2;
+      for (let i = 0; i < pcm.length; i++, offset += 2) {
+        view.setInt16(offset, pcm[i], true);
       }
 
-      return new Blob([buffer], { type: "audio/wav" });
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+      }
+      return btoa(binary);
     },
 
-    _convertToWavBase64: async function (blob) {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) throw new Error("Web Audio API is not available in this browser.");
-
-      const arrayBuffer = await blob.arrayBuffer();
-      const audioCtx = new AudioCtx();
+    _cleanup: function () {
       try {
-        // slice() copies — decodeAudioData may detach the buffer in some browsers.
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
-        const wavBlob = this._audioBufferToWavBlob(audioBuffer);
-        return await this._blobToBase64(wavBlob);
-      } finally {
-        if (typeof audioCtx.close === "function") {
-          try { await audioCtx.close(); } catch { /* ignore */ }
+        if (this._processor) {
+          this._processor.onaudioprocess = null;
+          this._processor.disconnect();
         }
+      } catch { /* ignore */ }
+      try { if (this._source) this._source.disconnect(); } catch { /* ignore */ }
+      try { if (this._mute) this._mute.disconnect(); } catch { /* ignore */ }
+      if (this._stream) {
+        this._stream.getTracks().forEach(function (t) { t.stop(); });
+      }
+      const ctx = this._audioCtx;
+      this._stream = null;
+      this._source = null;
+      this._processor = null;
+      this._mute = null;
+      this._audioCtx = null;
+      this._recording = false;
+      if (ctx && typeof ctx.close === "function") {
+        try { ctx.close(); } catch { /* ignore */ }
       }
     },
 
     start: function () {
       const self = this;
-      return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return Promise.reject(new Error("Microphone API is not available in this browser."));
+      }
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) {
+        return Promise.reject(new Error("Web Audio API is not available in this browser."));
+      }
+
+      self._cleanup();
+      self._pcmChunks = [];
+
+      return navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      }).then(function (stream) {
         self._stream = stream;
-        self._chunks = [];
-        self._mimeType = self._pickMimeType();
-        self._recorder = self._mimeType
-          ? new MediaRecorder(stream, { mimeType: self._mimeType })
-          : new MediaRecorder(stream);
-        // Keep the actual type the recorder chose (may differ from the request).
-        if (self._recorder.mimeType) self._mimeType = self._recorder.mimeType;
+        self._audioCtx = new AudioCtx();
+        // Browsers often ignore a requested rate; record actual rate and resample on stop.
+        self._inputSampleRate = self._audioCtx.sampleRate || 48000;
 
-        self._recorder.ondataavailable = function (e) {
-          if (e.data && e.data.size > 0) self._chunks.push(e.data);
-        };
-        self._recorder.onstop = function () {
-          stream.getTracks().forEach(function (t) { t.stop(); });
-          self._stream = null;
+        return self._audioCtx.resume().then(function () {
+          self._source = self._audioCtx.createMediaStreamSource(stream);
+          // ScriptProcessor is deprecated but widely available; AudioWorklet needs a separate module URL.
+          const bufferSize = 4096;
+          self._processor = self._audioCtx.createScriptProcessor(bufferSize, 1, 1);
+          self._processor.onaudioprocess = function (e) {
+            if (!self._recording) return;
+            const input = e.inputBuffer.getChannelData(0);
+            self._pcmChunks.push(new Float32Array(input));
+          };
 
-          const type = (self._mimeType || "audio/webm").split(";")[0] || "audio/webm";
-          const blob = new Blob(self._chunks, { type: type });
-          const resolve = self._resolveStop;
-          self._resolveStop = null;
+          // Keep the processor graph alive without audible feedback.
+          self._mute = self._audioCtx.createGain();
+          self._mute.gain.value = 0;
+          self._source.connect(self._processor);
+          self._processor.connect(self._mute);
+          self._mute.connect(self._audioCtx.destination);
 
-          if (!resolve) return;
-          if (!blob.size) {
-            resolve("");
-            return;
-          }
-
-          // Always convert to WAV — gpt-4o-transcribe-diarize often rejects MediaRecorder WebM/MP4.
-          self._convertToWavBase64(blob)
-            .then(function (base64) { resolve(base64); })
-            .catch(function (err) {
-              console.error("SpeechInsight: failed to convert recording to WAV", err);
-              resolve("");
-            });
-        };
-
-        // Timeslice ensures chunks are emitted during recording (more reliable final blob).
-        self._recorder.start(250);
-        return true;
+          self._recording = true;
+          return true;
+        });
+      }).catch(function (err) {
+        self._cleanup();
+        throw err;
       });
     },
 
     stop: function () {
       const self = this;
       return new Promise(function (resolve) {
-        self._resolveStop = resolve;
-        if (self._recorder && self._recorder.state !== "inactive") {
-          try { self._recorder.requestData(); } catch { /* optional */ }
-          self._recorder.stop();
-        } else {
+        try {
+          self._recording = false;
+          const chunks = self._pcmChunks || [];
+          const inputRate = self._inputSampleRate || 48000;
+          self._cleanup();
+
+          if (!chunks.length) {
+            resolve("");
+            return;
+          }
+
+          let total = 0;
+          for (let i = 0; i < chunks.length; i++) total += chunks[i].length;
+          const merged = new Float32Array(total);
+          let offset = 0;
+          for (let i = 0; i < chunks.length; i++) {
+            merged.set(chunks[i], offset);
+            offset += chunks[i].length;
+          }
+          self._pcmChunks = [];
+
+          // 16 kHz mono PCM WAV — widely accepted by OpenAI transcription models.
+          const targetRate = 16000;
+          const resampled = self._resample(merged, inputRate, targetRate);
+          if (!resampled.length) {
+            resolve("");
+            return;
+          }
+
+          resolve(self._encodeWavBase64(resampled, targetRate));
+        } catch (err) {
+          console.error("SpeechInsight: failed to finalize recording", err);
+          self._cleanup();
           resolve("");
         }
       });
