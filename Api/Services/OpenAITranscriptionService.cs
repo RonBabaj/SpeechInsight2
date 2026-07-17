@@ -95,22 +95,29 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             return await TranscribeWithWhisperAsync(bytes, resolvedName, resolvedType);
         }
 
-        // Browser mic containers (webm/mp4/ogg/wav) are often rejected by gpt-4o-transcribe-diarize.
-        // Convert to a clean mono 24 kHz MP3 first, then run diarization on that file.
+        // OpenAI-supported containers: mp3, mp4, mpeg, mpga, m4a, wav, webm.
+        // Browser MediaRecorder encodings of those are often rejected by gpt-4o-transcribe-diarize
+        // even when the extension is "supported". Official diarize examples use PCM WAV — convert to that.
         var diarizeBytes = bytes;
         var diarizeName = resolvedName;
         var diarizeType = resolvedType;
-        var converted = await TryPrepareMp3ForDiarizeAsync(bytes, resolvedName, isMicRecording);
+
+        var inputExt = Path.GetExtension(resolvedName);
+        if (string.IsNullOrEmpty(inputExt))
+            inputExt = Path.GetExtension(fileName);
+        if (string.IsNullOrEmpty(inputExt))
+            inputExt = ".webm";
+
+        var converted = await _transcodeService.TryConvertToWavAsync(bytes, inputExt);
         if (converted != null)
         {
             diarizeBytes = converted;
-            diarizeName = "recording.mp3";
-            diarizeType = "audio/mpeg";
+            diarizeName = "audio.wav";
+            diarizeType = "audio/wav";
         }
         else if (isMicRecording)
         {
-            // Conversion failed (ffmpeg missing/broken) — still return a transcript via whisper.
-            _logger.LogWarning("Mic→MP3 conversion unavailable; using {Model} without speaker labels.", _options.DefaultModel);
+            _logger.LogWarning("Mic→WAV conversion unavailable; using {Model} without speaker labels.", _options.DefaultModel);
             return await TranscribeWithWhisperAsync(bytes, resolvedName, resolvedType);
         }
 
@@ -126,13 +133,15 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             return ParseTranscriptionDetails(body, _options.DiarizeModel, diarize: true);
 
         _logger.LogWarning(
-            "Diarize model failed (status={Status}, mic={IsMic}). Falling back to {Fallback}. Body={Body}",
+            "Diarize model failed (status={Status}, mic={IsMic}, file={File}, bytes={Bytes}). Falling back to {Fallback}. Body={Body}",
             status,
             isMicRecording,
+            diarizeName,
+            diarizeBytes.Length,
             _options.DefaultModel,
             Truncate(body, 500));
 
-        // Prefer original bytes for whisper — it is more tolerant of MediaRecorder containers.
+        // Always fall back for mic or unsupported-file errors so the user still gets a transcript.
         if (isMicRecording || LooksLikeUnsupportedAudio(body))
             return await TranscribeWithWhisperAsync(bytes, resolvedName, resolvedType);
 
@@ -153,23 +162,6 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             throw new OpenAITranscriptionException((HttpStatusCode)status, body);
 
         return ParseTranscriptionDetails(body, _options.DefaultModel, diarize: false);
-    }
-
-    private async Task<byte[]?> TryPrepareMp3ForDiarizeAsync(byte[] bytes, string resolvedName, bool forceForMic)
-    {
-        // Always convert mic recordings. For uploads, convert non-MP3 containers that diarize often rejects.
-        var ext = Path.GetExtension(resolvedName);
-        if (string.IsNullOrEmpty(ext))
-            ext = ".webm";
-
-        var alreadyMp3 = ext.Equals(".mp3", StringComparison.OrdinalIgnoreCase)
-            || ext.Equals(".mpga", StringComparison.OrdinalIgnoreCase)
-            || ext.Equals(".mpeg", StringComparison.OrdinalIgnoreCase);
-
-        if (!forceForMic && alreadyMp3)
-            return null;
-
-        return await _transcodeService.TryConvertToMp3Async(bytes, ext);
     }
 
     private static TranscriptionDetails ParseTranscriptionDetails(string body, string model, bool diarize)
@@ -261,18 +253,17 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("OPENAI_API_KEY is not set. Add it to .env or environment.");
 
+        // Build multipart like: curl -F file=@audio.wav -F model=... -F response_format=... -F chunking_strategy=auto
         using var content = new MultipartFormDataContent();
 
-        // Match curl -F file=@audio.ext: OpenAI detects format from the filename extension.
         var fileContent = new ByteArrayContent(audioBytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Add(fileContent, "file", fileName);
 
-        // Plain form fields (no charset=utf-8), matching curl -F model=...
-        content.Add(new StringContent(model), "model");
-        content.Add(new StringContent(responseFormat), "response_format");
-
+        content.Add(CreateFormField(model), "model");
+        content.Add(CreateFormField(responseFormat), "response_format");
         if (!string.IsNullOrWhiteSpace(chunkingStrategy))
-            content.Add(new StringContent(chunkingStrategy), "chunking_strategy");
+            content.Add(CreateFormField(chunkingStrategy), "chunking_strategy");
 
         using var request = new HttpRequestMessage(HttpMethod.Post, WhisperEndpoint);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
@@ -281,7 +272,7 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         using var response = await _httpClient.SendAsync(request);
         var body = await response.Content.ReadAsStringAsync();
 
-        if (statusIsFailure((int)response.StatusCode))
+        if ((int)response.StatusCode is < 200 or >= 300)
         {
             _logger.LogWarning(
                 "OpenAI transcription error: status={Status}, model={Model}, file={File}, type={Type}, bytes={Bytes}, body={Body}",
@@ -294,8 +285,13 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         }
 
         return ((int)response.StatusCode, body);
+    }
 
-        static bool statusIsFailure(int status) => status is < 200 or >= 300;
+    /// <summary>Form field without charset=utf-8 (matches curl -F field=value).</summary>
+    private static ByteArrayContent CreateFormField(string value)
+    {
+        var part = new ByteArrayContent(System.Text.Encoding.UTF8.GetBytes(value));
+        return part;
     }
 
     private static string Truncate(string value, int max)

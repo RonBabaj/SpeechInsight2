@@ -1,12 +1,12 @@
 namespace SpeechInsight.Api.Services;
 
-/// <summary>Converts browser microphone audio to MP3 for OpenAI diarization models.</summary>
+/// <summary>Converts browser microphone audio to a clean PCM WAV for OpenAI diarization.</summary>
 public interface IAudioTranscodeService
 {
     /// <summary>
-    /// Transcodes audio bytes to mono 24 kHz MP3 via ffmpeg.
-    /// <paramref name="inputExtension"/> must include the dot (e.g. ".webm", ".wav").
+    /// Transcodes audio bytes to mono 24 kHz 16-bit PCM WAV via ffmpeg.
+    /// <paramref name="inputExtension"/> must include the dot (e.g. ".webm", ".m4a").
     /// Returns null when ffmpeg is unavailable or conversion fails.
     /// </summary>
-    Task<byte[]?> TryConvertToMp3Async(byte[] audioBytes, string inputExtension, CancellationToken cancellationToken = default);
+    Task<byte[]?> TryConvertToWavAsync(byte[] audioBytes, string inputExtension, CancellationToken cancellationToken = default);
 }
