@@ -419,6 +419,7 @@ To return to latest `main` afterward: `git reset --hard origin/main` and redeplo
 ### Deployment troubleshooting
 
 - **Workflow SSH failures** – Confirm `VPS_HOST`, `VPS_USER`, and `VPS_SSH_KEY`; ensure the public key is in `~/.ssh/authorized_keys` and the user can access `/opt/apps/SpeechInsight2`.
+- **`detected dubious ownership`** – The deploy user does not own the repo directory (common if it was cloned as root). The workflow marks `/opt/apps/SpeechInsight2` as a Git safe directory. To fix permanently on the VPS: `sudo chown -R "$USER:$USER" /opt/apps/SpeechInsight2`.
 - **Container unhealthy / curl fails** – `docker compose logs --tail=100`; confirm port 8080 is free and `.env` contains `OPENAI_API_KEY`.
 - **Compose cannot find `.env`** – Create `/opt/apps/SpeechInsight2/.env` from `.env.example` before the first deploy.
 - **NPM 502** – Proxy must target the host/container port where Compose publishes `8080`; restart only the `speechinsight2` stack (`docker compose` in this directory), not other Compose projects.

@@ -27,6 +27,9 @@ jobs:
           script: |
             set -euo pipefail
 
+            # Repo may be owned by another user (e.g. root); allow this deploy user to run git.
+            git config --global --add safe.directory /opt/apps/SpeechInsight2
+
             cd /opt/apps/SpeechInsight2
 
             git fetch origin
