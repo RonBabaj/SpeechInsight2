@@ -219,18 +219,17 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
         using var content = new MultipartFormDataContent();
 
-        // ByteArrayContent is more reliable than StreamContent for multipart uploads to OpenAI.
+        // Match curl -F file=@audio.wav: bytes + filename extension OpenAI uses to detect format.
+        // ByteArrayContent avoids StreamContent length/position quirks.
         var fileContent = new ByteArrayContent(audioBytes);
         fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-        // Explicit header avoids RFC 5987 filename*= encoding that some APIs mishandle.
-        fileContent.Headers.TryAddWithoutValidation(
-            "Content-Disposition",
-            $"form-data; name=\"file\"; filename=\"{fileName}\"");
-        content.Add(fileContent);
+        content.Add(fileContent, "file", fileName);
 
+        // Plain UTF-8 fields without charset=utf-8 (closer to curl -F model=...).
         content.Add(CreatePlainField(model), "model");
         content.Add(CreatePlainField(responseFormat), "response_format");
 
+        // gpt-4o-transcribe-diarize requires chunking_strategy for longer audio; "auto" is always safe.
         if (!string.IsNullOrWhiteSpace(chunkingStrategy))
             content.Add(CreatePlainField(chunkingStrategy), "chunking_strategy");
 
@@ -240,14 +239,32 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
         using var response = await _httpClient.SendAsync(request);
         var body = await response.Content.ReadAsStringAsync();
+
+        if (statusIsFailure((int)response.StatusCode))
+        {
+            _logger.LogWarning(
+                "OpenAI transcription error: status={Status}, model={Model}, file={File}, type={Type}, bytes={Bytes}, body={Body}",
+                (int)response.StatusCode,
+                model,
+                fileName,
+                contentType,
+                audioBytes.Length,
+                Truncate(body, 500));
+        }
+
         return ((int)response.StatusCode, body);
+
+        static bool statusIsFailure(int status) => status is < 200 or >= 300;
     }
 
-    /// <summary>StringContent without charset=utf-8 — some APIs are picky about multipart text fields.</summary>
-    private static StringContent CreatePlainField(string value)
+    private static string Truncate(string value, int max)
+        => string.IsNullOrEmpty(value) || value.Length <= max ? value : value[..max] + "…";
+
+    /// <summary>Multipart text field without charset parameter (mirrors curl form fields).</summary>
+    private static ByteArrayContent CreatePlainField(string value)
     {
-        var content = new StringContent(value, Encoding.UTF8);
-        content.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        var content = new ByteArrayContent(Encoding.UTF8.GetBytes(value));
+        // Intentionally no Content-Type — OpenAI examples send bare form fields.
         return content;
     }
 
@@ -360,10 +377,14 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
     private static bool LooksLikeUnsupportedAudio(string responseBody)
     {
         if (string.IsNullOrWhiteSpace(responseBody)) return false;
+        // Only treat file-format rejections as retryable — not chunking_strategy / other invalid_value errors.
         return responseBody.Contains("corrupted or unsupported", StringComparison.OrdinalIgnoreCase)
-            || responseBody.Contains("invalid_value", StringComparison.OrdinalIgnoreCase)
             || responseBody.Contains("unsupported_format", StringComparison.OrdinalIgnoreCase)
-            || responseBody.Contains("does not support the format", StringComparison.OrdinalIgnoreCase);
+            || responseBody.Contains("does not support the format", StringComparison.OrdinalIgnoreCase)
+            || (responseBody.Contains("\"param\": \"file\"", StringComparison.OrdinalIgnoreCase)
+                && responseBody.Contains("invalid_value", StringComparison.OrdinalIgnoreCase))
+            || (responseBody.Contains("\"param\":\"file\"", StringComparison.OrdinalIgnoreCase)
+                && responseBody.Contains("invalid_value", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Bare MIME type without parameters (e.g. audio/webm, not audio/webm;codecs=opus).</summary>

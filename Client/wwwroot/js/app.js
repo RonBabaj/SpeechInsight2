@@ -209,8 +209,8 @@ window.speechInsight = {
           }
           self._pcmChunks = [];
 
-          // 16 kHz mono PCM WAV — widely accepted by OpenAI transcription models.
-          const targetRate = 16000;
+          // 24 kHz mono PCM WAV — preferred by gpt-4o-transcribe-diarize (whisper-1 is more forgiving).
+          const targetRate = 24000;
           const resampled = self._resample(merged, inputRate, targetRate);
           if (!resampled.length) {
             resolve("");
