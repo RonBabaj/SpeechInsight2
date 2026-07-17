@@ -174,8 +174,9 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
         // Wrap so MultipartFormDataContent disposal does not dispose the caller's stream (controller owns it).
         var fileContent = new StreamContent(new LeaveOpenStream(audioStream));
-        if (!string.IsNullOrWhiteSpace(contentType))
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        var mediaType = NormalizeMediaType(contentType);
+        if (mediaType != null)
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue(mediaType);
 
         content.Add(fileContent, "file", fileName);
         content.Add(new StringContent(model), "model");
@@ -191,6 +192,14 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         using var response = await _httpClient.SendAsync(request);
         var body = await response.Content.ReadAsStringAsync();
         return ((int)response.StatusCode, body);
+    }
+
+    /// <summary>Bare MIME type without parameters (e.g. audio/webm, not audio/webm;codecs=opus).</summary>
+    private static string? NormalizeMediaType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType)) return null;
+        var mediaType = contentType.Split(';', 2)[0].Trim();
+        return string.IsNullOrWhiteSpace(mediaType) ? null : mediaType;
     }
 
     /// <summary>Stream wrapper that does not dispose the underlying stream when this wrapper is disposed. Caller retains ownership.</summary>

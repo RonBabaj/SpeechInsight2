@@ -115,6 +115,8 @@
     private bool _jsReady;
     private bool _isRecording;
     private byte[]? _recordedAudioBytes;
+    private string _recordedContentType = "audio/wav";
+    private string _recordedFileName = "recording.wav";
     private string? _lastUploadFileName;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -222,7 +224,15 @@
         {
             var base64 = await Js.InvokeAsync<string>("speechInsight.recording.stop");
             _recordedAudioBytes = string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
-            if ((_recordedAudioBytes?.Length ?? 0) > MaxFileSizeBytes)
+            _recordedContentType = "audio/wav";
+            _recordedFileName = "recording.wav";
+
+            if ((_recordedAudioBytes?.Length ?? 0) == 0)
+            {
+                _fileValidationError = "Recording was empty or could not be processed. Please try again and speak for a moment before stopping.";
+                _recordedAudioBytes = null;
+            }
+            else if ((_recordedAudioBytes?.Length ?? 0) > MaxFileSizeBytes)
             {
                 _fileValidationError = "Recording is too long. Maximum size is 25 MB.";
                 _recordedAudioBytes = null;
@@ -305,8 +315,8 @@
             if (hasRecording && _recordedAudioBytes != null)
             {
                 stream = new MemoryStream(_recordedAudioBytes);
-                fileName = "recording.webm";
-                contentType = "audio/webm";
+                fileName = _recordedFileName;
+                contentType = _recordedContentType;
             }
             else
             {

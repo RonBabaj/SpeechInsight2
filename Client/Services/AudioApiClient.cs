@@ -34,8 +34,8 @@ public sealed class AudioApiClient
 
     /// <summary>Uploads audio (file or recording) and returns detailed transcription. Uses the same endpoint as file uploads.</summary>
     /// <param name="audioContent">Audio stream (from file or microphone recording).</param>
-    /// <param name="fileName">Display name for the part (e.g. "recording.webm" or original file name).</param>
-    /// <param name="contentType">Optional MIME type (e.g. "audio/webm", "audio/wav").</param>
+    /// <param name="fileName">Display name for the part (e.g. "recording.wav" or original file name).</param>
+    /// <param name="contentType">Optional MIME type (e.g. "audio/wav", "audio/mpeg").</param>
     /// <param name="diarize">Whether to use speaker-diarization model.</param>
     /// <param name="ct">Cancellation token.</param>
     public async Task<AnalyzeDetailsResponseDto> AnalyzeDetailsAsync(
@@ -47,8 +47,9 @@ public sealed class AudioApiClient
     {
         using var form = new MultipartFormDataContent();
         var streamContent = new StreamContent(audioContent);
-        if (!string.IsNullOrWhiteSpace(contentType))
-            streamContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+        var mediaType = NormalizeMediaType(contentType);
+        if (mediaType != null)
+            streamContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
         form.Add(streamContent, "audioFile", fileName);
 
         var url = $"api/audio/analyze/details?diarize={diarize.ToString().ToLowerInvariant()}";
@@ -99,5 +100,13 @@ public sealed class AudioApiClient
         catch { /* use default message */ }
 
         throw new AudioApiException(statusCode, message, detail);
+    }
+
+    /// <summary>Returns a bare MIME type (no codec parameters). OpenAI rejects some types with ;codecs=…</summary>
+    private static string? NormalizeMediaType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType)) return null;
+        var mediaType = contentType.Split(';', 2)[0].Trim();
+        return string.IsNullOrWhiteSpace(mediaType) ? null : mediaType;
     }
 }
