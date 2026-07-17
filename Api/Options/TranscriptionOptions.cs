@@ -10,7 +10,7 @@ public class TranscriptionOptions
 
     public long MaxFileSizeBytes { get; set; } = 25 * 1024 * 1024;
     public int MaxDurationSeconds { get; set; } = 900;
-    public string[] AllowedExtensions { get; set; } = { ".mp3", ".mpga", ".m4a", ".wav", ".webm", ".mp4", ".mpeg" };
+    public string[] AllowedExtensions { get; set; } = { ".mp3", ".mpga", ".m4a", ".wav", ".webm", ".mp4", ".mpeg", ".ogg" };
     public string DefaultModel { get; set; } = "whisper-1";
     public string DiarizeModel { get; set; } = "gpt-4o-transcribe-diarize";
 }

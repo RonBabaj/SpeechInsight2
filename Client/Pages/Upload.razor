@@ -90,7 +90,7 @@
     private const long MaxFileSizeBytes = 25 * 1024 * 1024;
     private const string HistoryStorageKey = "SpeechInsight_Recent";
     private const string ModelStorageKey = "SpeechInsight_Model";
-    private static readonly string[] AllowedExtensions = { ".mp3", ".mpga", ".m4a", ".wav", ".webm", ".mp4", ".mpeg" };
+    private static readonly string[] AllowedExtensions = { ".mp3", ".mpga", ".m4a", ".wav", ".webm", ".mp4", ".mpeg", ".ogg" };
     private static readonly System.Text.Json.JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -222,10 +222,26 @@
     {
         try
         {
-            var bytes = await Js.InvokeAsync<byte[]?>("speechInsight.recording.stop");
-            _recordedAudioBytes = (bytes?.Length ?? 0) > 0 ? bytes : null;
-            _recordedContentType = "audio/wav";
-            _recordedFileName = "recording.wav";
+            var payload = await Js.InvokeAsync<string>("speechInsight.recording.stop");
+            _recordedAudioBytes = null;
+            _recordedContentType = "audio/webm";
+            _recordedFileName = "recording.webm";
+
+            if (!string.IsNullOrEmpty(payload))
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(payload);
+                var root = doc.RootElement;
+                var b64 = root.TryGetProperty("base64", out var b64El) ? b64El.GetString() : null;
+                var mime = root.TryGetProperty("mimeType", out var mimeEl) ? mimeEl.GetString() : null;
+                var name = root.TryGetProperty("fileName", out var nameEl) ? nameEl.GetString() : null;
+
+                if (!string.IsNullOrEmpty(b64))
+                    _recordedAudioBytes = Convert.FromBase64String(b64);
+                if (!string.IsNullOrWhiteSpace(mime))
+                    _recordedContentType = mime.Split(';')[0].Trim();
+                if (!string.IsNullOrWhiteSpace(name))
+                    _recordedFileName = name;
+            }
 
             if ((_recordedAudioBytes?.Length ?? 0) == 0)
             {
@@ -343,7 +359,7 @@
             _durationExceedsRecommended = details.DurationExceedsRecommended;
 
             if (_modelChoice == "diarize" && !details.Diarized)
-                _actionHint = "Speaker separation was not available for this microphone recording; showing a standard transcript instead.";
+                _actionHint = "Speaker separation was unavailable for this recording; showing a standard transcript instead.";
 
             _lastUploadFileName = fileName;
             _history.Insert(0, new HistoryEntry(fileName, details.DurationSeconds, _stats.WordCount, _transcription, details, details.Summary, details.Sentiment?.Label, DateTime.UtcNow));

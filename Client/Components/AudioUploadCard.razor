@@ -37,7 +37,7 @@
             <option value="basic">Basic (Whisper — cheaper)</option>
         </select>
     </div>
-    <p class="cost-hint">Basic is cheaper; “With speakers” may cost more per minute.</p>
+    <p class="cost-hint">Basic is cheaper. “With speakers” separates speakers (mic recordings are converted server-side first).</p>
     <div class="button-row">
         <button type="button" class="btn-primary" @onclick="OnSubmit" disabled="@(IsProcessing || !HasAudioSource)">
             Upload and analyze

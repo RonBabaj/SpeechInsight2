@@ -31,7 +31,7 @@ RUN dotnet publish Api/SpeechInsight.Api.csproj -c Release -o /out/api
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# curl is used by Docker Compose healthchecks; ffmpeg transcodes mic WAV → MP3 for diarization.
+# curl is used by Docker Compose healthchecks; ffmpeg converts mic webm/mp4/wav → MP3 for diarization.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ffmpeg \
   && rm -rf /var/lib/apt/lists/*
