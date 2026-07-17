@@ -359,7 +359,7 @@
             _durationExceedsRecommended = details.DurationExceedsRecommended;
 
             if (_modelChoice == "diarize" && !details.Diarized)
-                _actionHint = "Speaker separation is not available for microphone recordings yet. Showing a standard transcript instead. Upload an audio file for speaker labels.";
+                _actionHint = "Speaker separation was unavailable for this recording; showing a standard transcript instead.";
 
             _lastUploadFileName = fileName;
             _history.Insert(0, new HistoryEntry(fileName, details.DurationSeconds, _stats.WordCount, _transcription, details, details.Summary, details.Sentiment?.Label, DateTime.UtcNow));
