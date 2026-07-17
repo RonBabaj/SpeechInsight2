@@ -2,7 +2,6 @@
 // Parses duration (usage/segments) and language (when present in response) for the analysis pipeline.
 using System.Net.Http.Headers;
 using System.Net;
-using System.Text;
 using System.Text.Json;
 
 namespace SpeechInsight.Api.Services;
@@ -80,32 +79,34 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
         var isMicRecording = IsMicrophoneRecording(fileName);
         var (resolvedName, resolvedType) = ResolveAudioIdentity(bytes, fileName, contentType);
 
-        // gpt-4o-transcribe-diarize often rejects browser PCM WAV; MP3 transcode is more reliable.
-        if (diarize && isMicRecording && IsRiffWav(bytes))
-        {
-            var mp3 = await _transcodeService.TryConvertWavToMp3Async(bytes);
-            if (mp3 is { Length: > 0 })
-            {
-                bytes = mp3;
-                resolvedName = "recording.mp3";
-                resolvedType = "audio/mpeg";
-                _logger.LogInformation("Mic recording transcoded to MP3 ({Bytes} bytes) for diarization.", bytes.Length);
-            }
-            else
-            {
-                _logger.LogWarning("Mic WAV→MP3 transcode unavailable; diarize may fail (ffmpeg missing?).");
-            }
-        }
-
         _logger.LogInformation(
-            "OpenAI upload identity: mic={IsMic}, requested={RequestedName}/{RequestedType}, resolved={ResolvedName}/{ResolvedType}, bytes={Bytes}, magic={Magic}",
+            "OpenAI upload identity: mic={IsMic}, diarizeRequested={Diarize}, requested={RequestedName}/{RequestedType}, resolved={ResolvedName}/{ResolvedType}, bytes={Bytes}, magic={Magic}",
             isMicRecording,
+            diarize,
             fileName,
             contentType,
             resolvedName,
             resolvedType,
             bytes.Length,
             DescribeMagic(bytes));
+
+        // gpt-4o-transcribe-diarize rejects browser MediaRecorder audio (WebM/MP4/WAV) that whisper-1 accepts.
+        // Mic recordings always use whisper-1 so users get a transcript instead of a hard failure.
+        if (isMicRecording)
+        {
+            var (micStatus, micBody) = await CallOpenAIAsync(
+                bytes,
+                resolvedName,
+                resolvedType,
+                _options.DefaultModel,
+                "verbose_json",
+                chunkingStrategy: null);
+
+            if (micStatus is < 200 or >= 300)
+                throw new OpenAITranscriptionException((HttpStatusCode)micStatus, micBody);
+
+            return ParseTranscriptionDetails(micBody, _options.DefaultModel, diarize: false);
+        }
 
         if (!diarize)
         {
@@ -123,6 +124,19 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             return ParseTranscriptionDetails(basicBody, _options.DefaultModel, diarize: false);
         }
 
+        // Optional: for WAV file uploads that look like browser PCM, try MP3 for diarize.
+        if (IsRiffWav(bytes))
+        {
+            var mp3 = await _transcodeService.TryConvertWavToMp3Async(bytes);
+            if (mp3 is { Length: > 0 })
+            {
+                bytes = mp3;
+                resolvedName = "audio.mp3";
+                resolvedType = "audio/mpeg";
+                _logger.LogInformation("WAV upload transcoded to MP3 ({Bytes} bytes) for diarization.", bytes.Length);
+            }
+        }
+
         var (status, body) = await CallOpenAIAsync(
             bytes,
             resolvedName,
@@ -135,13 +149,12 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
             return ParseTranscriptionDetails(body, _options.DiarizeModel, diarize: true);
 
         _logger.LogWarning(
-            "Diarize model failed (status={Status}, mic={IsMic}). Body={Body}",
+            "Diarize model failed (status={Status}). Falling back to {Fallback}. Body={Body}",
             status,
-            isMicRecording,
+            _options.DefaultModel,
             Truncate(body, 500));
 
-        // Mic recordings: always fall back to whisper-1 so "With speakers" still returns a transcript.
-        if (isMicRecording || LooksLikeUnsupportedAudio(body))
+        if (LooksLikeUnsupportedAudio(body))
         {
             var (fallbackStatus, fallbackBody) = await CallOpenAIAsync(
                 bytes,
@@ -152,17 +165,8 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
                 chunkingStrategy: null);
 
             if (fallbackStatus is >= 200 and < 300)
-            {
-                _logger.LogInformation(
-                    "Diarize unavailable; returned {Model} transcript without speaker labels.",
-                    _options.DefaultModel);
                 return ParseTranscriptionDetails(fallbackBody, _options.DefaultModel, diarize: false);
-            }
 
-            _logger.LogWarning(
-                "Whisper fallback also failed (status={Status}): {Body}",
-                fallbackStatus,
-                Truncate(fallbackBody, 500));
             throw new OpenAITranscriptionException((HttpStatusCode)fallbackStatus, fallbackBody);
         }
 
@@ -260,17 +264,16 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
         using var content = new MultipartFormDataContent();
 
-        // OpenAI infers format from filename extension; omit Content-Type on the file part.
+        // Match curl -F file=@audio.ext: OpenAI detects format from the filename extension.
         var fileContent = new ByteArrayContent(audioBytes);
         content.Add(fileContent, "file", fileName);
 
-        // Plain UTF-8 fields without charset=utf-8 (closer to curl -F model=...).
-        content.Add(CreatePlainField(model), "model");
-        content.Add(CreatePlainField(responseFormat), "response_format");
+        // Plain form fields (no charset=utf-8), matching curl -F model=...
+        content.Add(new StringContent(model), "model");
+        content.Add(new StringContent(responseFormat), "response_format");
 
-        // gpt-4o-transcribe-diarize requires chunking_strategy for longer audio; "auto" is always safe.
         if (!string.IsNullOrWhiteSpace(chunkingStrategy))
-            content.Add(CreatePlainField(chunkingStrategy), "chunking_strategy");
+            content.Add(new StringContent(chunkingStrategy), "chunking_strategy");
 
         using var request = new HttpRequestMessage(HttpMethod.Post, WhisperEndpoint);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
@@ -298,14 +301,6 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
     private static string Truncate(string value, int max)
         => string.IsNullOrEmpty(value) || value.Length <= max ? value : value[..max] + "…";
-
-    /// <summary>Multipart text field without charset parameter (mirrors curl form fields).</summary>
-    private static ByteArrayContent CreatePlainField(string value)
-    {
-        var content = new ByteArrayContent(Encoding.UTF8.GetBytes(value));
-        // Intentionally no Content-Type — OpenAI examples send bare form fields.
-        return content;
-    }
 
     private static async Task<byte[]> ReadAllBytesAsync(Stream audioStream)
     {
