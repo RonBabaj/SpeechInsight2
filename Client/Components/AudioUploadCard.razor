@@ -38,7 +38,6 @@
         </select>
     </div>
     <p class="cost-hint">Basic is cheaper. “With speakers” converts microphone audio to WAV on the server, then separates speakers.</p>
-    <p class="hint build-stamp">Client build 20260718a — if this text is missing after deploy, hard-refresh (Ctrl+Shift+R).</p>
     <div class="button-row">
         <button type="button" class="btn-primary" @onclick="OnSubmit" disabled="@(IsProcessing || !HasAudioSource)">
             Upload and analyze
