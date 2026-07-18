@@ -328,12 +328,14 @@ Production runs on an **Ubuntu 24.04 VPS** at `/opt/apps/SpeechInsight2` using *
 |-------|--------|
 | Path on VPS | `/opt/apps/SpeechInsight2` |
 | Compose project | `speechinsight2` (only this stack is started/stopped) |
-| Container | `speechinsight2` |
+| **Only allowed container** | `speechinsight2` |
 | Internal port | `8080` (map `8080:8080` for NPM → host) |
-| Health endpoint | `GET /api/health` |
+| Health endpoint | `GET /api/health` → `{ status, gitSha, build }` |
 | Secrets on host | `/opt/apps/SpeechInsight2/.env` (gitignored) |
 
-Docker Compose is the **only** deployment mechanism. GitHub Actions SSHes into the VPS and runs Compose there; it does not push images to a registry or touch unrelated containers.
+Docker Compose is the **only** deployment mechanism. GitHub Actions SSHes into the VPS and runs Compose there; it does not push images to a registry.
+
+**Critical:** Nginx Proxy Manager must forward to **host `127.0.0.1:8080`** or Docker DNS name **`speechinsight2:8080`**. Never target `speechinsight-api` or any other container name — an orphan with that name previously kept serving a 3-day-old build while CI health-checked the new container on `:8080`.
 
 ### Required GitHub Secrets
 
@@ -359,17 +361,22 @@ File: `.github/workflows/deploy.yml`
 
 **Triggers:** push to `main`, or manual `workflow_dispatch`.
 
-**What it runs on the VPS** (fails immediately on any error):
+**What it verifies (fails the job unless all pass):**
+
+1. VPS `git rev-parse HEAD` equals `github.sha` / `origin/main`
+2. Image `speechinsight2:latest` is rebuilt with label `org.opencontainers.image.revision=<sha>`
+3. Container `speechinsight2` is force-recreated from that image
+4. No other `speechinsight*` containers remain (orphans removed)
+5. `GET http://127.0.0.1:8080/api/health` returns `"gitSha":"<same sha>"`
 
 ```bash
 cd /opt/apps/SpeechInsight2
-git fetch origin
-git reset --hard origin/main
-docker compose down
+git fetch origin && git reset --hard origin/main
+export GIT_SHA=$(git rev-parse HEAD)
+docker compose down --remove-orphans
 docker compose build --pull
-docker compose up -d
-docker image prune -f
-# then: docker compose ps + curl http://127.0.0.1:8080/api/health until healthy
+docker compose up -d --force-recreate --remove-orphans
+curl -fsS http://127.0.0.1:8080/api/health   # must include matching gitSha
 ```
 
 `git reset --hard` only updates tracked files; your host `.env` stays intact because it is gitignored/untracked.
@@ -383,19 +390,21 @@ cd /opt/apps/SpeechInsight2
 # first time only: cp .env.example .env && edit OPENAI_API_KEY
 git fetch origin
 git reset --hard origin/main
-docker compose down
+export GIT_SHA=$(git rev-parse HEAD)
+docker compose down --remove-orphans
 docker compose build --pull
-docker compose up -d
+docker compose up -d --force-recreate --remove-orphans
 docker compose ps
 curl -fsS http://127.0.0.1:8080/api/health
 ```
 
-Point Nginx Proxy Manager at the host port **8080** (or the Docker network alias if you attach NPM to the same network).
+Point Nginx Proxy Manager at **host port 8080** or container **`speechinsight2:8080`** (same Docker network as NPM).
 
 **Local smoke test** (from repo root):
 
 ```bash
 cp .env.example .env   # set OPENAI_API_KEY
+export GIT_SHA=$(git rev-parse HEAD)
 docker compose build
 docker compose up -d
 curl -fsS http://127.0.0.1:8080/api/health
@@ -408,9 +417,10 @@ cd /opt/apps/SpeechInsight2
 git fetch origin
 git log --oneline -20          # pick a known-good commit
 git reset --hard <commit-sha>
-docker compose down
+export GIT_SHA=$(git rev-parse HEAD)
+docker compose down --remove-orphans
 docker compose build --pull
-docker compose up -d
+docker compose up -d --force-recreate --remove-orphans
 curl -fsS http://127.0.0.1:8080/api/health
 ```
 
@@ -425,10 +435,16 @@ To return to latest `main` afterward: `git reset --hard origin/main` and redeplo
   ls -ld /opt/apps/SpeechInsight2 /opt/apps/SpeechInsight2/.git
   ```
   Then re-run the workflow. `safe.directory` alone does not fix write permission errors.
+- **Production looks stale but Actions is green** – Almost always an **orphan container** or wrong NPM upstream. On the VPS:
+  ```bash
+  docker ps -a --filter name=speechinsight
+  curl -fsS http://127.0.0.1:8080/api/health   # gitSha must equal git rev-parse HEAD
+  ```
+  Remove orphans: `docker compose down --remove-orphans` then redeploy. Delete any `speechinsight-api` / old service containers. Point NPM only at `speechinsight2` / host `:8080`.
 - **Container unhealthy / curl fails** – `docker compose logs --tail=100`; confirm port 8080 is free and `.env` contains `OPENAI_API_KEY`.
 - **Compose cannot find `.env`** – Create `/opt/apps/SpeechInsight2/.env` from `.env.example` before the first deploy.
-- **NPM 502** – Proxy must target the host/container port where Compose publishes `8080`; restart only the `speechinsight2` stack (`docker compose` in this directory), not other Compose projects.
-- **Stale image** – Redeploy runs `docker compose build --pull` and `docker image prune -f` (dangling images only; other apps’ tagged images are left alone).
+- **NPM 502** – Proxy must target host/container port `8080` on **`speechinsight2`**, not a removed/orphan name.
+- **Stale image** – Redeploy rebuilds with `GIT_SHA` baked in; verification fails if `/api/health.gitSha` mismatches.
 
 ---
 

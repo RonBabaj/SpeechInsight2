@@ -16,52 +16,133 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Checkout (record expected SHA)
+        uses: actions/checkout@v4
+
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: EXPECTED_SHA
           script_stop: true
           command_timeout: 25m
           script: |
             set -euo pipefail
 
             APP_DIR=/opt/apps/SpeechInsight2
+            EXPECTED_SHA="${EXPECTED_SHA:?EXPECTED_SHA not set}"
 
-            # Repo may be owned by another user (e.g. root); allow this deploy user to run git.
             git config --global --add safe.directory "${APP_DIR}"
-
             cd "${APP_DIR}"
 
+            echo "========== STAGE 1: preflight =========="
             echo "Deploy user: $(whoami) uid=$(id -u) gid=$(id -g)"
-            echo "Directory ownership:"
+            echo "EXPECTED_SHA (GitHub Actions github.sha)=${EXPECTED_SHA}"
             ls -ld "${APP_DIR}" "${APP_DIR}/.git" || true
 
             if [ ! -w "${APP_DIR}/.git" ]; then
               echo "ERROR: $(whoami) cannot write to ${APP_DIR}/.git"
-              echo "On the VPS, run (as a sudoer):"
-              echo "  sudo chown -R $(whoami):$(whoami) ${APP_DIR}"
+              echo "On the VPS, run: sudo chown -R $(whoami):$(whoami) ${APP_DIR}"
               exit 1
             fi
+
+            echo "========== STAGE 2: git update =========="
+            BEFORE_SHA="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
+            echo "BEFORE_SHA=${BEFORE_SHA}"
 
             git fetch origin
             git reset --hard origin/main
 
-            docker compose down
-            docker compose build --pull
-            docker compose up -d
+            AFTER_SHA="$(git rev-parse HEAD)"
+            echo "AFTER_SHA=${AFTER_SHA}"
+            echo "origin/main=$(git rev-parse origin/main)"
 
-            docker image prune -f
+            if [ "${AFTER_SHA}" != "${EXPECTED_SHA}" ]; then
+              echo "ERROR: VPS HEAD (${AFTER_SHA}) != GitHub Actions SHA (${EXPECTED_SHA})"
+              echo "Remote may be behind, or reset targeted the wrong ref."
+              git log -3 --oneline
+              exit 1
+            fi
+            if [ "${AFTER_SHA}" != "$(git rev-parse origin/main)" ]; then
+              echo "ERROR: HEAD does not match origin/main after reset --hard"
+              exit 1
+            fi
+            echo "OK: working tree is at ${AFTER_SHA}"
 
-            echo "Waiting for containers..."
-            docker compose ps
+            echo "========== STAGE 3: docker build =========="
+            export GIT_SHA="${AFTER_SHA}"
+            IMAGE_BEFORE_ID="$(docker images -q speechinsight2:latest 2>/dev/null || true)"
+            echo "IMAGE_BEFORE_ID=${IMAGE_BEFORE_ID:-none}"
 
-            echo "Verifying health endpoint..."
+            # Tear down current stack AND orphans from renamed services (e.g. speechinsight-api).
+            docker compose down --remove-orphans || true
+
+            # Fail closed if any old SpeechInsight containers still exist outside this stack.
+            leftover="$(docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -iE 'speechinsight' | grep -v '^speechinsight2[[:space:]]' || true)"
+            if [ -n "${leftover}" ]; then
+              echo "WARNING: leftover speechinsight containers after compose down --remove-orphans:"
+              echo "${leftover}"
+              echo "Force-removing leftover containers that are not speechinsight2..."
+              echo "${leftover}" | awk '{print $1}' | while read -r name; do
+                [ -n "${name}" ] || continue
+                docker rm -f "${name}" || true
+              done
+            fi
+
+            # Rebuild with commit baked in. --pull refreshes base images; layer cache still
+            # invalidates when Client/ or Api/ COPY inputs change (proven in prior deploy logs).
+            docker compose build --pull --build-arg GIT_SHA="${GIT_SHA}"
+
+            IMAGE_AFTER_ID="$(docker images -q --no-trunc speechinsight2:latest | head -1)"
+            echo "IMAGE_AFTER_ID=${IMAGE_AFTER_ID:-none}"
+            if [ -z "${IMAGE_AFTER_ID}" ]; then
+              echo "ERROR: speechinsight2:latest was not produced by docker compose build"
+              exit 1
+            fi
+
+            IMAGE_LABEL_SHA="$(docker image inspect speechinsight2:latest --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+            echo "IMAGE_LABEL_SHA=${IMAGE_LABEL_SHA:-missing}"
+            if [ "${IMAGE_LABEL_SHA}" != "${EXPECTED_SHA}" ]; then
+              echo "ERROR: image label org.opencontainers.image.revision (${IMAGE_LABEL_SHA}) != ${EXPECTED_SHA}"
+              exit 1
+            fi
+            echo "OK: image rebuilt/labeled for ${EXPECTED_SHA}"
+
+            echo "========== STAGE 4: recreate container =========="
+            docker compose up -d --force-recreate --remove-orphans
+
+            CREATED="$(docker inspect -f '{{.Created}}' speechinsight2)"
+            RUNNING_IMAGE_ID="$(docker inspect -f '{{.Image}}' speechinsight2)"
+            echo "CONTAINER_CREATED=${CREATED}"
+            echo "CONTAINER_IMAGE_ID=${RUNNING_IMAGE_ID}"
+
+            if [ "${RUNNING_IMAGE_ID}" != "${IMAGE_AFTER_ID}" ]; then
+              echo "ERROR: running container image ID != freshly built speechinsight2:latest"
+              echo "  container=${RUNNING_IMAGE_ID}"
+              echo "  latest=${IMAGE_AFTER_ID}"
+              exit 1
+            fi
+
+            # Absolute ban on duplicate/orphan SpeechInsight app containers.
+            extras="$(docker ps --format '{{.Names}}' | grep -iE 'speechinsight' | grep -vx 'speechinsight2' || true)"
+            if [ -n "${extras}" ]; then
+              echo "ERROR: unexpected extra speechinsight containers still running (NPM may route to these):"
+              echo "${extras}"
+              docker ps --filter name=speechinsight
+              exit 1
+            fi
+            echo "OK: only speechinsight2 is running"
+
+            echo "========== STAGE 5: health + commit proof =========="
             healthy=0
+            health_body=""
             for i in $(seq 1 30); do
-              if curl -fsS "http://127.0.0.1:8080/api/health" >/dev/null; then
-                echo "Health check passed on attempt ${i}"
+              if health_body="$(curl -fsS "http://127.0.0.1:8080/api/health")"; then
+                echo "Health HTTP OK on attempt ${i}: ${health_body}"
                 healthy=1
                 break
               fi
@@ -76,12 +157,40 @@ jobs:
               exit 1
             fi
 
-            running="$(docker compose ps --status running --format '{{.Name}}')"
-            if ! printf '%s\n' "${running}" | grep -qx 'speechinsight2'; then
-              echo "ERROR: required container speechinsight2 is not running"
+            # Require health payload gitSha == deployed commit (proves app binary is new).
+            served_sha="$(printf '%s' "${health_body}" | sed -n 's/.*"gitSha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            echo "HEALTH_GIT_SHA=${served_sha}"
+            if [ "${served_sha}" != "${EXPECTED_SHA}" ]; then
+              echo "ERROR: /api/health gitSha (${served_sha}) != expected (${EXPECTED_SHA})"
+              echo "Host :8080 is not serving the commit we just built."
               docker compose ps
+              docker ps --filter name=speechinsight
               exit 1
             fi
 
-            echo "Deployment verified successfully."
+            echo "========== STAGE 6: traffic / duplicate inventory =========="
+            echo "--- git ---"
+            git rev-parse HEAD
+            echo "--- compose ps ---"
             docker compose ps
+            echo "--- docker ps (speechinsight*) ---"
+            docker ps -a --filter name=speechinsight --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+            echo "--- images ---"
+            docker images 'speechinsight2*' --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}'
+            echo "--- inspect speechinsight2 ---"
+            docker inspect speechinsight2 --format 'Name={{.Name}} Image={{.Config.Image}} ID={{.Image}} Created={{.Created}} GitLabel={{index .Config.Labels "org.opencontainers.image.revision"}} EnvGIT_SHA={{range .Config.Env}}{{println .}}{{end}}' | head -40
+            echo "--- recent logs ---"
+            docker logs --tail=50 speechinsight2 || true
+
+            # Prune only dangling layers AFTER verification succeeded.
+            docker image prune -f
+
+            echo "========== DEPLOY OK =========="
+            echo "GitHub SHA     : ${EXPECTED_SHA}"
+            echo "VPS git HEAD   : $(git rev-parse HEAD)"
+            echo "Image label    : ${IMAGE_LABEL_SHA}"
+            echo "Health gitSha  : ${served_sha}"
+            echo "Container      : speechinsight2 @ ${CREATED}"
+            echo ""
+            echo "NPM must forward to host 127.0.0.1:8080 (or Docker alias speechinsight2:8080)."
+            echo "Do NOT point NPM at speechinsight-api or any other orphan name."
