@@ -3,6 +3,12 @@
 #
 # Required on the host (gitignored): .env with at least OPENAI_API_KEY=...
 # Optional overrides: ASPNETCORE_ENVIRONMENT, PORT
+#
+# GIT_SHA must be passed by the deploy script (git rev-parse HEAD) so the
+# running container's /api/health.gitSha matches the checked-out commit.
+#
+# container_name is speechinsight-api to match the existing Nginx Proxy Manager
+# Forward Hostname (Docker DNS). Do not rename without updating NPM.
 
 name: speechinsight2
 
@@ -11,8 +17,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     image: speechinsight2:latest
-    container_name: speechinsight2
+    container_name: speechinsight-api
     ports:
       - "8080:8080"
     env_file:
@@ -20,6 +28,10 @@ services:
     environment:
       PORT: "8080"
       ASPNETCORE_ENVIRONMENT: Production
+      GIT_SHA: ${GIT_SHA:-unknown}
+    labels:
+      org.opencontainers.image.revision: ${GIT_SHA:-unknown}
+      speechinsight.role: production-app
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]

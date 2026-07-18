@@ -1,4 +1,5 @@
-// Simple health check for availability checks (e.g. load balancers, monitoring).
+// Health check for load balancers and deploy verification.
+// Returns gitSha baked into the image (ENV GIT_SHA) so CI can prove the running app matches origin/main.
 using Microsoft.AspNetCore.Mvc;
 
 namespace SpeechInsight.Api.Controllers;
@@ -8,10 +9,16 @@ namespace SpeechInsight.Api.Controllers;
 public class HealthController : ControllerBase
 {
     [HttpGet("health")]
-    public IActionResult Get() => Ok(new
+    public IActionResult Get()
     {
-        status = "ok",
-        timestamp = DateTime.UtcNow,
-        build = "20260718a"
-    });
+        var gitSha = Environment.GetEnvironmentVariable("GIT_SHA") ?? "unknown";
+        return Ok(new
+        {
+            status = "ok",
+            timestamp = DateTime.UtcNow,
+            gitSha,
+            // Short stamp for humans / UI checks
+            build = gitSha.Length >= 7 ? gitSha[..7] : gitSha
+        });
+    }
 }
