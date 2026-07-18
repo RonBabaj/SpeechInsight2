@@ -62,7 +62,11 @@ public class AudioController : ControllerBase
     }
 
     [HttpPost("analyze/details")]
-    public async Task<IActionResult> AnalyzeDetails([FromForm] IFormFile? audioFile, [FromQuery] bool diarize = true)
+    public async Task<IActionResult> AnalyzeDetails(
+        [FromForm] IFormFile? audioFile,
+        [FromQuery] bool diarize = true,
+        [FromQuery] bool mic = false,
+        [FromForm] string? source = null)
     {
         var validation = ValidateFile(audioFile);
         if (validation != null) return validation;
@@ -75,15 +79,28 @@ public class AudioController : ControllerBase
             await sourceStream.CopyToAsync(copy);
             copy.Position = 0;
 
+            var fromMic = mic
+                || string.Equals(source, "microphone", StringComparison.OrdinalIgnoreCase)
+                || (audioFile.FileName?.StartsWith("recording.", StringComparison.OrdinalIgnoreCase) ?? false);
+
+            // Guarantee mic uploads are named recording.* so transcription treats them as microphone audio.
+            var fileName = audioFile.FileName ?? "audio.bin";
+            if (fromMic && !fileName.StartsWith("recording.", StringComparison.OrdinalIgnoreCase))
+            {
+                var ext = Path.GetExtension(fileName);
+                if (string.IsNullOrEmpty(ext)) ext = ".webm";
+                fileName = "recording" + ext;
+            }
+
             var response = await _audioAnalysisService.AnalyzeAsync(
                 copy,
-                audioFile.FileName,
+                fileName,
                 audioFile.ContentType,
                 diarize);
 
             _logger.LogInformation(
-                "Analysis success: model={Model}, durationSec={Duration}, words={Words}, language={Lang}",
-                response.Model, response.DurationSeconds, response.WordCount, response.DetectedLanguage);
+                "Analysis success: mic={Mic}, model={Model}, durationSec={Duration}, words={Words}, language={Lang}, diarized={Diarized}",
+                fromMic, response.Model, response.DurationSeconds, response.WordCount, response.DetectedLanguage, response.Diarized);
 
             return Ok(response);
         }

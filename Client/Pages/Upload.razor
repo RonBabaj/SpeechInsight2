@@ -347,7 +347,8 @@
                 fileName,
                 contentType,
                 _modelChoice == "diarize",
-                _uploadCts.Token);
+                _uploadCts.Token,
+                fromMicrophone: hasRecording);
 
             _loadingStatus = "Done";
             StateHasChanged();
