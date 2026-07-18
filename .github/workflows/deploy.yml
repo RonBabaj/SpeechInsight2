@@ -165,11 +165,10 @@ jobs:
               docker network connect "${net}" "${CONTAINER_NAME}" || true
             }
 
+            # Use process substitution (not an unindented heredoc) so this stays valid YAML.
             while IFS= read -r net; do
               attach_net "${net}"
-            done <<EOF
-${NPM_NETWORKS}
-EOF
+            done < <(printf '%s\n' "${NPM_NETWORKS}")
 
             # Fallbacks if we had no prior container / empty network list.
             for guess in nginxproxymanager_default npm_default proxy network; do
