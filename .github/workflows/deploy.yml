@@ -34,6 +34,8 @@ jobs:
             set -euo pipefail
 
             APP_DIR=/opt/apps/SpeechInsight2
+            # Must match docker-compose.yml container_name and NPM Forward Hostname.
+            CONTAINER_NAME=speechinsight-api
             EXPECTED_SHA="${EXPECTED_SHA:?EXPECTED_SHA not set}"
 
             git config --global --add safe.directory "${APP_DIR}"
@@ -42,6 +44,7 @@ jobs:
             echo "========== STAGE 1: preflight =========="
             echo "Deploy user: $(whoami) uid=$(id -u) gid=$(id -g)"
             echo "EXPECTED_SHA (GitHub Actions github.sha)=${EXPECTED_SHA}"
+            echo "CONTAINER_NAME=${CONTAINER_NAME}"
             ls -ld "${APP_DIR}" "${APP_DIR}/.git" || true
 
             if [ ! -w "${APP_DIR}/.git" ]; then
@@ -73,28 +76,45 @@ jobs:
             fi
             echo "OK: working tree is at ${AFTER_SHA}"
 
-            echo "========== STAGE 3: docker build =========="
+            echo "========== STAGE 3: preserve NPM docker networks =========="
+            # NPM reaches the app via Docker DNS name speechinsight-api on a shared
+            # network. Capture those networks before we recreate the container.
+            NPM_NETWORKS=""
+            if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+              NPM_NETWORKS="$(docker inspect "${CONTAINER_NAME}" --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' | sed '/^$/d' || true)"
+              echo "Networks currently attached to ${CONTAINER_NAME}:"
+              printf '%s\n' "${NPM_NETWORKS:-"(none)"}"
+            else
+              echo "No existing ${CONTAINER_NAME} container; will attach to common NPM networks if present."
+            fi
+
+            echo "========== STAGE 4: docker build =========="
             export GIT_SHA="${AFTER_SHA}"
             IMAGE_BEFORE_ID="$(docker images -q speechinsight2:latest 2>/dev/null || true)"
             echo "IMAGE_BEFORE_ID=${IMAGE_BEFORE_ID:-none}"
 
-            # Tear down current stack AND orphans from renamed services (e.g. speechinsight-api).
+            # Tear down current stack AND orphans (e.g. old container_name speechinsight2).
             docker compose down --remove-orphans || true
 
-            # Fail closed if any old SpeechInsight containers still exist outside this stack.
-            leftover="$(docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -iE 'speechinsight' | grep -v '^speechinsight2[[:space:]]' || true)"
+            # Remove any leftover SpeechInsight containers that are not the authoritative name.
+            leftover="$(docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -iE 'speechinsight' | grep -v "^${CONTAINER_NAME}[[:space:]]" || true)"
             if [ -n "${leftover}" ]; then
               echo "WARNING: leftover speechinsight containers after compose down --remove-orphans:"
               echo "${leftover}"
-              echo "Force-removing leftover containers that are not speechinsight2..."
+              echo "Force-removing leftovers (keeping only ${CONTAINER_NAME} if present)..."
               echo "${leftover}" | awk '{print $1}' | while read -r name; do
                 [ -n "${name}" ] || continue
                 docker rm -f "${name}" || true
               done
             fi
 
-            # Rebuild with commit baked in. --pull refreshes base images; layer cache still
-            # invalidates when Client/ or Api/ COPY inputs change (proven in prior deploy logs).
+            # If an old speechinsight-api still exists (stopped/orphan), remove it so
+            # compose can recreate with the same container_name from the new image.
+            if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+              echo "Removing existing ${CONTAINER_NAME} so compose can recreate it..."
+              docker rm -f "${CONTAINER_NAME}" || true
+            fi
+
             docker compose build --pull --build-arg GIT_SHA="${GIT_SHA}"
 
             IMAGE_AFTER_ID="$(docker images -q --no-trunc speechinsight2:latest | head -1)"
@@ -112,11 +132,11 @@ jobs:
             fi
             echo "OK: image rebuilt/labeled for ${EXPECTED_SHA}"
 
-            echo "========== STAGE 4: recreate container =========="
+            echo "========== STAGE 5: recreate container =========="
             docker compose up -d --force-recreate --remove-orphans
 
-            CREATED="$(docker inspect -f '{{.Created}}' speechinsight2)"
-            RUNNING_IMAGE_ID="$(docker inspect -f '{{.Image}}' speechinsight2)"
+            CREATED="$(docker inspect -f '{{.Created}}' "${CONTAINER_NAME}")"
+            RUNNING_IMAGE_ID="$(docker inspect -f '{{.Image}}' "${CONTAINER_NAME}")"
             echo "CONTAINER_CREATED=${CREATED}"
             echo "CONTAINER_IMAGE_ID=${RUNNING_IMAGE_ID}"
 
@@ -127,17 +147,45 @@ jobs:
               exit 1
             fi
 
-            # Absolute ban on duplicate/orphan SpeechInsight app containers.
-            extras="$(docker ps --format '{{.Names}}' | grep -iE 'speechinsight' | grep -vx 'speechinsight2' || true)"
+            echo "========== STAGE 6: re-attach NPM networks =========="
+            # Reconnect to every network the previous speechinsight-api used, plus
+            # common Nginx Proxy Manager network names if they exist.
+            attach_net() {
+              net="$1"
+              [ -n "${net}" ] || return 0
+              if ! docker network inspect "${net}" >/dev/null 2>&1; then
+                echo "Skip missing network: ${net}"
+                return 0
+              fi
+              if docker inspect "${CONTAINER_NAME}" --format '{{json .NetworkSettings.Networks}}' | grep -q "\"${net}\""; then
+                echo "Already on network: ${net}"
+                return 0
+              fi
+              echo "Connecting ${CONTAINER_NAME} to network: ${net}"
+              docker network connect "${net}" "${CONTAINER_NAME}" || true
+            }
+
+            while IFS= read -r net; do
+              attach_net "${net}"
+            done <<EOF
+${NPM_NETWORKS}
+EOF
+
+            # Fallbacks if we had no prior container / empty network list.
+            for guess in nginxproxymanager_default npm_default proxy network; do
+              attach_net "${guess}"
+            done
+
+            extras="$(docker ps --format '{{.Names}}' | grep -iE 'speechinsight' | grep -vx "${CONTAINER_NAME}" || true)"
             if [ -n "${extras}" ]; then
-              echo "ERROR: unexpected extra speechinsight containers still running (NPM may route to these):"
+              echo "ERROR: unexpected extra speechinsight containers still running:"
               echo "${extras}"
               docker ps --filter name=speechinsight
               exit 1
             fi
-            echo "OK: only speechinsight2 is running"
+            echo "OK: only ${CONTAINER_NAME} is running"
 
-            echo "========== STAGE 5: health + commit proof =========="
+            echo "========== STAGE 7: health + commit proof =========="
             healthy=0
             health_body=""
             for i in $(seq 1 30); do
@@ -157,7 +205,6 @@ jobs:
               exit 1
             fi
 
-            # Require health payload gitSha == deployed commit (proves app binary is new).
             served_sha="$(printf '%s' "${health_body}" | sed -n 's/.*"gitSha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
             echo "HEALTH_GIT_SHA=${served_sha}"
             if [ "${served_sha}" != "${EXPECTED_SHA}" ]; then
@@ -168,21 +215,23 @@ jobs:
               exit 1
             fi
 
-            echo "========== STAGE 6: traffic / duplicate inventory =========="
+            # Also prove the NPM Docker DNS name resolves to this same container when possible.
+            echo "========== STAGE 8: inventory =========="
             echo "--- git ---"
             git rev-parse HEAD
             echo "--- compose ps ---"
             docker compose ps
             echo "--- docker ps (speechinsight*) ---"
             docker ps -a --filter name=speechinsight --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+            echo "--- networks on ${CONTAINER_NAME} ---"
+            docker inspect "${CONTAINER_NAME}" --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
             echo "--- images ---"
             docker images 'speechinsight2*' --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}'
-            echo "--- inspect speechinsight2 ---"
-            docker inspect speechinsight2 --format 'Name={{.Name}} Image={{.Config.Image}} ID={{.Image}} Created={{.Created}} GitLabel={{index .Config.Labels "org.opencontainers.image.revision"}} EnvGIT_SHA={{range .Config.Env}}{{println .}}{{end}}' | head -40
+            echo "--- inspect ${CONTAINER_NAME} ---"
+            docker inspect "${CONTAINER_NAME}" --format 'Name={{.Name}} Image={{.Config.Image}} ID={{.Image}} Created={{.Created}} GitLabel={{index .Config.Labels "org.opencontainers.image.revision"}}' 
             echo "--- recent logs ---"
-            docker logs --tail=50 speechinsight2 || true
+            docker logs --tail=50 "${CONTAINER_NAME}" || true
 
-            # Prune only dangling layers AFTER verification succeeded.
             docker image prune -f
 
             echo "========== DEPLOY OK =========="
@@ -190,7 +239,7 @@ jobs:
             echo "VPS git HEAD   : $(git rev-parse HEAD)"
             echo "Image label    : ${IMAGE_LABEL_SHA}"
             echo "Health gitSha  : ${served_sha}"
-            echo "Container      : speechinsight2 @ ${CREATED}"
+            echo "Container      : ${CONTAINER_NAME} @ ${CREATED}"
             echo ""
-            echo "NPM must forward to host 127.0.0.1:8080 (or Docker alias speechinsight2:8080)."
-            echo "Do NOT point NPM at speechinsight-api or any other orphan name."
+            echo "NPM Forward Hostname should remain: speechinsight-api (port 8080)."
+            echo "Legacy container name speechinsight2 is retired; do not point NPM at it."

@@ -12,7 +12,7 @@ services:
       context: ../..
       dockerfile: Dockerfile
     image: speechinsight2:latest
-    container_name: speechinsight2
+    container_name: speechinsight-api
     ports:
       - "8080:8080"
     env_file:

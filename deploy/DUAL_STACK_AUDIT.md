@@ -1,10 +1,10 @@
 # Dual-stack deployment audit (SpeechInsight2 VPS)
 
-**Status:** LIVE UPSTREAM IDENTIFIED. **Do not delete** `speechinsight-api` until NPM is retargeted and public traffic is confirmed on `speechinsight2`.
+**Status:** LIVE UPSTREAM = `speechinsight-api` (NPM). **Resolution:** make Compose/GHA use that same `container_name` — keep NPM unchanged.
 
 **Evidence sources:**
 - GitHub Actions deploy logs (e.g. run [29638525502](https://github.com/RonBabaj/SpeechInsight2/actions/runs/29638525502))
-- Nginx Proxy Manager screenshot (2026-07-18): proxy host for `speechinsight.rongurfinkel.com`
+- Nginx Proxy Manager: proxy host for `speechinsight.rongurfinkel.com`
 - Public probe of `https://speechinsight.rongurfinkel.com`
 
 ## Confirmed NPM upstream (production)
@@ -17,114 +17,76 @@
 | Forward Port | `8080` |
 | Cache Assets | On |
 
-**Conclusion:** Production traffic goes to the **orphan** container `speechinsight-api`, **not** the GHA-deployed `speechinsight2`.
+**Conclusion:** Production traffic goes to Docker DNS name **`speechinsight-api`**. Keep that NPM setting; align the Compose stack to it.
 
-Public corroboration (2026-07-18):
-- `GET /api/health` → `{"status":"ok",...}` with **no** `gitSha` (pre–PR #18 shape)
-- `index.html` `Last-Modified: Tue, 14 Jul 2026` — matches orphan age, not Jul 18 deploys
+Public corroboration (2026-07-18, before cutover):
+- `GET /api/health` → `{"status":"ok",...}` with **no** `gitSha`
+- `index.html` `Last-Modified: Tue, 14 Jul 2026` — stale orphan build
 
-## Snapshot from latest successful deploy (main)
+## Snapshot before fix (two containers)
 
-| Container | Image | Compose service | Host ports | Age at that deploy |
-|-----------|--------|-----------------|------------|--------------------|
-| **`speechinsight2`** | `speechinsight2:latest` | **`app`** | **`0.0.0.0:8080->8080`** | recreated every deploy |
-| **`speechinsight-api`** | `speechinsight2-speechinsight` | **`speechinsight`** | none (`8080/tcp` only) | **Up ~3 days** (never recreated by GHA) |
+| Container | Image | Compose service | Host ports | Role |
+|-----------|--------|-----------------|------------|------|
+| `speechinsight2` | `speechinsight2:latest` | `app` | `0.0.0.0:8080->8080` | What GHA rebuilt (wrong name for NPM) |
+| `speechinsight-api` | `speechinsight2-speechinsight` | `speechinsight` (orphan) | none | What NPM served |
 
-Compose also logged:
-
-> Found orphan containers (**speechinsight-api**) for this project.
-
-So both containers share Compose **project** `speechinsight2`; the second is an **orphan** (service no longer in the compose file).
+Compose warned: *Found orphan containers (speechinsight-api)*.
 
 ---
 
-## 1. Why two deployments exist
+## 1. Why two deployments existed
 
-1. **Authoritative stack (repo, since PR #9):** project `speechinsight2`, service `app`, `container_name: speechinsight2`, explicit `image: speechinsight2:latest`, publish `8080:8080`. GitHub Actions deploys this from `/opt/apps/SpeechInsight2`.
-
-2. **Legacy stack (VPS-only, not in git history):** service name `speechinsight`, container `speechinsight-api`, image `speechinsight2-speechinsight`. That image name is Compose’s default `{project}-{service}` when no `image:` is set — i.e. project `speechinsight2` + service `speechinsight`. No committed compose file ever defined that service (root compose has always used `app` / `speechinsight2`).
-
-3. **Why it survived:** on `main`, deploy still runs `docker compose down` **without** `--remove-orphans`, then `up -d`. Compose leaves orphans running and only warns. First successful GHA (#11, ~2026-07-17 06:00) already saw the orphan “Up 46 hours” → created ~**2026-07-15**, before the new pipeline worked.
+1. Repo compose (PR #9) used `container_name: speechinsight2` while NPM already pointed at `speechinsight-api`.
+2. The live `speechinsight-api` was an orphan of project `speechinsight2` (service `speechinsight`, image `speechinsight2-speechinsight`).
+3. `docker compose down` without `--remove-orphans` left the orphan forever; GHA health-checked host `:8080` (the new container) so deploys looked green.
 
 ---
 
 ## 2. Which deployment serves production traffic
 
-**Confirmed live:** `speechinsight-api` (via NPM Forward Hostname).
-
-| Path | Hits which container? |
-|------|------------------------|
-| NPM → `speechinsight-api:8080` (current) | **`speechinsight-api`** ← **production today** |
-| Host / NPM `http://127.0.0.1:8080` | **`speechinsight2` only** (sole publisher of host port 8080) |
-| Docker DNS `http://speechinsight2:8080` | **`speechinsight2`** |
-
-GitHub Actions verifies only host `:8080` → green deploys update `speechinsight2` while users still hit the orphan.
+**Confirmed live:** Docker DNS **`speechinsight-api:8080`** (NPM Forward Hostname).
 
 ---
 
-## 3. Which Docker Compose project owns each container
+## 3. Compose project ownership
 
-Both are labeled under the **same** Compose project: **`speechinsight2`** (working dir `/opt/apps/SpeechInsight2`).
-
-| Container | Project | Service | Role |
-|-----------|---------|---------|------|
-| `speechinsight2` | `speechinsight2` | `app` | Current compose file; GHA-owned |
-| `speechinsight-api` | `speechinsight2` | `speechinsight` | Orphan; leftover from a prior/manual service definition |
-
-There is **not** a second Compose project name in the Actions inventory — only one project with an orphaned service.
-
-(The optional file `deploy/speechinsight2/docker-compose.yml` uses project name `speechinsight2-deploy-alt` and is **not** what GHA runs.)
+Both were project **`speechinsight2`**. After the fix there is one container: **`speechinsight-api`**, service `app`, image `speechinsight2:latest`.
 
 ---
 
-## 4. Does GitHub Actions deploy to the same target NPM serves?
+## 4. Did GHA deploy to the same target NPM serves?
 
-**No.** Confirmed mismatch.
+**Previously: no.** GHA updated `speechinsight2`; NPM hit the orphan `speechinsight-api`.
 
-- GHA rebuilds/health-checks **`speechinsight2`** on host `:8080`.
-- NPM serves **`speechinsight-api:8080`**.
-- Users never see new builds until NPM is changed.
+**After this PR: yes.** Compose `container_name` is `speechinsight-api`; deploy recreates that name, re-attaches prior Docker networks for NPM DNS, and verifies `/api/health.gitSha`.
 
 ---
 
 ## 5. Should old artifacts be removed?
 
-**Yes — after live traffic is confirmed on `speechinsight2`.**
+**Yes — the duplicate `speechinsight2` container and the old image `speechinsight2-speechinsight`.** The name `speechinsight-api` stays; it becomes the fresh Compose-managed container.
 
-Safe to remove once public health matches `speechinsight2`:
-
-- Container: `speechinsight-api`
-- Image: `speechinsight2-speechinsight` (and any dangling layers)
-
-**Do not remove** while public `/api/health` still matches only the orphan (that would take production down if NPM uses that name).
+Do not manually `docker rm speechinsight-api` while it is still the only NPM target unless a replacement with the same name is coming up immediately (the deploy workflow handles recreate).
 
 ---
 
-## 6. Zero-downtime migration (do this next)
+## 6. Migration (keep NPM on `speechinsight-api`)
 
-Both containers stay up until after cutover — **change NPM first, delete later**.
+**No NPM change required.**
 
-1. **In NPM → Edit Proxy Host → Details** for `speechinsight.rongurfinkel.com`:
-   - Change **Forward Hostname / IP** from `speechinsight-api` → **`speechinsight2`**
-     (or `127.0.0.1` if you prefer host networking; port stays **8080**)
-   - Optionally turn **Cache Assets** **off** temporarily so browsers/NPM don’t keep the Jul 14 HTML
-   - Save
-
-2. **Verify cutover (no deletes yet):**
+1. Merge this PR and let GitHub Actions deploy (or run the workflow manually).
+2. Deploy will:
+   - Capture networks attached to the current `speechinsight-api` (so NPM Docker DNS keeps working)
+   - `docker compose down --remove-orphans` (drops old `speechinsight2` + orphan)
+   - Build `speechinsight2:latest` with `GIT_SHA`
+   - Create **new** `speechinsight-api` from that image (`8080:8080`)
+   - Re-attach saved / common NPM networks
+   - Fail unless host `:8080` health returns matching `gitSha`
+3. Verify:
    ```bash
-   curl -fsS https://speechinsight.rongurfinkel.com/api/health
+   curl -fsS https://speechinsight.rongurfinkel.com/api/health   # expect gitSha
    curl -sI https://speechinsight.rongurfinkel.com/ | grep -i last-modified
    ```
-   Expect a fresh `Last-Modified` (not 14 Jul) and, after PR #18 is deployed, a `gitSha` matching `main`.
+4. Optionally turn NPM **Cache Assets** off briefly and hard-refresh the browser.
 
-3. **Hard-refresh the site** (or private window) and confirm UI (e.g. Client build stamp from #17).
-
-4. **Merge/run [PR #18](https://github.com/RonBabaj/SpeechInsight2/pull/18)** so the next deploy uses `--remove-orphans` and removes `speechinsight-api` safely.
-
-5. **Only then** (if orphan still present and NPM already points at `speechinsight2`):
-   ```bash
-   docker rm -f speechinsight-api
-   docker rmi speechinsight2-speechinsight
-   ```
-
-6. **Permanent NPM setting:** Forward Hostname = `speechinsight2` **or** `127.0.0.1`, port `8080`. Never `speechinsight-api`.
+Expect a short blip during container recreate (same as any compose down/up deploy). NPM Forward Hostname stays **`speechinsight-api`**.

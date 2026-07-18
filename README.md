@@ -328,14 +328,14 @@ Production runs on an **Ubuntu 24.04 VPS** at `/opt/apps/SpeechInsight2` using *
 |-------|--------|
 | Path on VPS | `/opt/apps/SpeechInsight2` |
 | Compose project | `speechinsight2` (only this stack is started/stopped) |
-| **Only allowed container** | `speechinsight2` |
-| Internal port | `8080` (map `8080:8080` for NPM → host) |
+| **Only allowed container** | `speechinsight-api` (matches NPM Forward Hostname) |
+| Internal port | `8080` (map `8080:8080`; also reachable via Docker DNS) |
 | Health endpoint | `GET /api/health` → `{ status, gitSha, build }` |
 | Secrets on host | `/opt/apps/SpeechInsight2/.env` (gitignored) |
 
 Docker Compose is the **only** deployment mechanism. GitHub Actions SSHes into the VPS and runs Compose there; it does not push images to a registry.
 
-**Critical:** Nginx Proxy Manager must forward to **host `127.0.0.1:8080`** or Docker DNS name **`speechinsight2:8080`**. Never target `speechinsight-api` or any other container name — an orphan with that name previously kept serving a 3-day-old build while CI health-checked the new container on `:8080`.
+**Critical:** Nginx Proxy Manager for `speechinsight.rongurfinkel.com` must forward to Docker DNS name **`speechinsight-api:8080`** (or host `127.0.0.1:8080`). The Compose `container_name` is deliberately `speechinsight-api` so GHA and NPM share one target. Do **not** leave a second container named `speechinsight2` running.
 
 ### Required GitHub Secrets
 
@@ -365,9 +365,10 @@ File: `.github/workflows/deploy.yml`
 
 1. VPS `git rev-parse HEAD` equals `github.sha` / `origin/main`
 2. Image `speechinsight2:latest` is rebuilt with label `org.opencontainers.image.revision=<sha>`
-3. Container `speechinsight2` is force-recreated from that image
-4. No other `speechinsight*` containers remain (orphans removed)
-5. `GET http://127.0.0.1:8080/api/health` returns `"gitSha":"<same sha>"`
+3. Container `speechinsight-api` is force-recreated from that image
+4. No other `speechinsight*` containers remain (orphans / old `speechinsight2` name removed)
+5. Container is re-attached to prior Docker networks so NPM DNS keeps working
+6. `GET http://127.0.0.1:8080/api/health` returns `"gitSha":"<same sha>"`
 
 ```bash
 cd /opt/apps/SpeechInsight2
@@ -398,7 +399,7 @@ docker compose ps
 curl -fsS http://127.0.0.1:8080/api/health
 ```
 
-Point Nginx Proxy Manager at **host port 8080** or container **`speechinsight2:8080`** (same Docker network as NPM).
+Point Nginx Proxy Manager at container **`speechinsight-api:8080`** (same Docker network as NPM) or host port **8080**.
 
 **Local smoke test** (from repo root):
 
@@ -435,15 +436,15 @@ To return to latest `main` afterward: `git reset --hard origin/main` and redeplo
   ls -ld /opt/apps/SpeechInsight2 /opt/apps/SpeechInsight2/.git
   ```
   Then re-run the workflow. `safe.directory` alone does not fix write permission errors.
-- **Production looks stale but Actions is green** – Almost always an **orphan container** or wrong NPM upstream. On the VPS:
+- **Production looks stale but Actions is green** – Check that only `speechinsight-api` is running and NPM still forwards to that name:
   ```bash
   docker ps -a --filter name=speechinsight
   curl -fsS http://127.0.0.1:8080/api/health   # gitSha must equal git rev-parse HEAD
   ```
-  Remove orphans: `docker compose down --remove-orphans` then redeploy. Delete any `speechinsight-api` / old service containers. Point NPM only at `speechinsight2` / host `:8080`.
+  Remove orphans / old `speechinsight2` containers: `docker compose down --remove-orphans` then redeploy.
 - **Container unhealthy / curl fails** – `docker compose logs --tail=100`; confirm port 8080 is free and `.env` contains `OPENAI_API_KEY`.
 - **Compose cannot find `.env`** – Create `/opt/apps/SpeechInsight2/.env` from `.env.example` before the first deploy.
-- **NPM 502** – Proxy must target host/container port `8080` on **`speechinsight2`**, not a removed/orphan name.
+- **NPM 502** – Proxy must target **`speechinsight-api:8080`** on a shared Docker network (deploy re-attaches prior networks). Fallback: host `127.0.0.1:8080`.
 - **Stale image** – Redeploy rebuilds with `GIT_SHA` baked in; verification fails if `/api/health.gitSha` mismatches.
 
 ---
