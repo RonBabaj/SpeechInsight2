@@ -43,7 +43,8 @@ public sealed class AudioApiClient
         string fileName,
         string? contentType,
         bool diarize,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool fromMicrophone = false)
     {
         // Prefer ByteArrayContent: Blazor WASM multipart + StreamContent can mis-send audio payloads.
         byte[] bytes;
@@ -69,8 +70,11 @@ public sealed class AudioApiClient
         if (mediaType != null)
             fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
         form.Add(fileContent, "audioFile", fileName);
+        if (fromMicrophone)
+            form.Add(new StringContent("microphone"), "source");
 
-        var url = $"api/audio/analyze/details?diarize={diarize.ToString().ToLowerInvariant()}";
+        var url = $"api/audio/analyze/details?diarize={diarize.ToString().ToLowerInvariant()}" +
+                  (fromMicrophone ? "&mic=true" : "");
         var response = await _http.PostAsync(url, form, ct);
 
         if (!response.IsSuccessStatusCode)

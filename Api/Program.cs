@@ -45,25 +45,39 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 app.UseCors();
+
+// Blazor Framework files (_framework/*) are served by UseBlazorFrameworkFiles, NOT UseStaticFiles —
+// so cache headers must be applied in middleware or browsers keep stale WASM/DLLs after deploy.
+app.Use(async (context, next) =>
+{
+    context.Response.OnStarting(() =>
+    {
+        var path = context.Request.Path.Value ?? "";
+        var noStore =
+            path.Equals("/", StringComparison.Ordinal) ||
+            path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".js", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".css", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith("blazor.boot.json", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/_framework", StringComparison.OrdinalIgnoreCase);
+
+        if (noStore)
+        {
+            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate, max-age=0";
+            context.Response.Headers.Pragma = "no-cache";
+            context.Response.Headers.Expires = "0";
+            context.Response.Headers["Surrogate-Control"] = "no-store";
+        }
+
+        return Task.CompletedTask;
+    });
+
+    await next();
+});
+
 app.UseBlazorFrameworkFiles();
 app.UseDefaultFiles();
-app.UseStaticFiles(new StaticFileOptions
-{
-    OnPrepareResponse = ctx =>
-    {
-        // Prevent stale Blazor/JS after deploys (old JS + new DLL can mislabel mic audio).
-        var path = ctx.Context.Request.Path.Value ?? "";
-        if (path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
-            path.Equals("/", StringComparison.Ordinal) ||
-            path.EndsWith("/js/app.js", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith("blazor.boot.json", StringComparison.OrdinalIgnoreCase))
-        {
-            ctx.Context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            ctx.Context.Response.Headers.Pragma = "no-cache";
-            ctx.Context.Response.Headers.Expires = "0";
-        }
-    }
-});
+app.UseStaticFiles();
 app.MapControllers();
 // SPA fallback: serve Blazor client for non-API routes (when client is served from this host).
 app.MapFallbackToFile("index.html");

@@ -143,7 +143,18 @@ public class OpenAITranscriptionService : ITranscriptionService, ITranscriptionD
 
         // Always fall back for mic or unsupported-file errors so the user still gets a transcript.
         if (isMicRecording || LooksLikeUnsupportedAudio(body))
-            return await TranscribeWithWhisperAsync(bytes, resolvedName, resolvedType);
+        {
+            try
+            {
+                return await TranscribeWithWhisperAsync(bytes, resolvedName, resolvedType);
+            }
+            catch (OpenAITranscriptionException) when (converted != null)
+            {
+                // Original browser bytes failed whisper too — retry with the converted PCM WAV.
+                _logger.LogWarning("Whisper failed on original mic bytes; retrying with converted WAV.");
+                return await TranscribeWithWhisperAsync(converted, "audio.wav", "audio/wav");
+            }
+        }
 
         throw new OpenAITranscriptionException((HttpStatusCode)status, body);
     }
